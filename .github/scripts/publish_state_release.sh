@@ -50,6 +50,9 @@ assets = payload.get("assets") or []
 def asset_link(name: str) -> str:
     return f"https://github.com/{repo}/releases/download/{release_tag}/{quote(name)}"
 
+def route_slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
 state_names = {}
 with open(states_csv, "r", encoding="utf-8", newline="") as handle:
     for row in csv.DictReader(handle):
@@ -104,7 +107,12 @@ if grouped_assets:
     for code in sorted(grouped_assets, key=lambda value: (int(value), value)):
         state_label = state_names.get(code, f"State {code}")
         state_entry = grouped_assets[code]
+        route_path = f"/not-so-open/environmental/approvals/{route_slug(state_label)}/parivesh/"
         lines.append(f"### {state_label} ({code})")
+        lines.append(
+            f"- Tiles - https://indianopenmaps.com{route_path}" + "{z}/{x}/{y}.pbf"
+            f" - [view](https://indianopenmaps.com{route_path}view)"
+        )
         if state_entry["csv"]:
             lines.append(f"- CSV archive: [{state_entry['csv']}]({asset_link(state_entry['csv'])})")
         else:
