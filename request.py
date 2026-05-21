@@ -45,6 +45,8 @@ class ParallelDownloader:
         self.skipped = 0
         self.failed = 0
         self.force_redownloaded = 0
+        self.max_5xx_retries = 5
+        self.retry_delay_seconds = 2.0
         
     def _load_timestamps(self):
         """Load timestamp data from JSON file"""
@@ -186,33 +188,43 @@ class ParallelDownloader:
                 
                 # Use appropriate HTTP method
                 request_method = session.post if self.http_method == 'POST' else session.get
-                async with request_method(url) as response:
-                    if response.status == 200:
-                        content = await response.text()
-                        
-                        # Validate content based on content type
-                        if self.content_type == 'json':
-                            try:
-                                json.loads(content)
-                            except json.JSONDecodeError:
-                                print(f"Warning: Invalid JSON from {url}")
-                                return False
-                        elif self.content_type == 'kml':
-                            if not ('<kml' in content.lower() or '<placemark' in content.lower()):
-                                print(f"Warning: Invalid KML content from {url}")
-                                return False
-                        
-                        # Write to temp file first, then move
-                        with open(temp_path, 'w') as f:
-                            f.write(content)
-                        
-                        os.rename(temp_path, output_path)
-                        self.downloaded += 1
-                        return True
-                    else:
+                for attempt in range(self.max_5xx_retries + 1):
+                    async with request_method(url) as response:
+                        if response.status == 200:
+                            content = await response.text()
+                            
+                            # Validate content based on content type
+                            if self.content_type == 'json':
+                                try:
+                                    json.loads(content)
+                                except json.JSONDecodeError:
+                                    print(f"Warning: Invalid JSON from {url}")
+                                    return False
+                            elif self.content_type == 'kml':
+                                if not ('<kml' in content.lower() or '<placemark' in content.lower()):
+                                    print(f"Warning: Invalid KML content from {url}")
+                                    return False
+                            
+                            # Write to temp file first, then move
+                            with open(temp_path, 'w') as f:
+                                f.write(content)
+                            
+                            os.rename(temp_path, output_path)
+                            self.downloaded += 1
+                            return True
+
+                        if 500 <= response.status <= 599 and attempt < self.max_5xx_retries:
+                            print(
+                                f"HTTP {response.status} for {url}; "
+                                f"retrying in {self.retry_delay_seconds:.1f}s "
+                                f"({attempt + 1}/{self.max_5xx_retries})"
+                            )
+                            await asyncio.sleep(self.retry_delay_seconds)
+                            continue
+
                         print(f"HTTP {response.status} for {url}")
                         return False
-                        
+                         
             except Exception as e:
                 print(f"Error downloading {url}: {e}")
                 # Clean up temp file

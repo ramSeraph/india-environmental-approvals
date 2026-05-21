@@ -20,11 +20,8 @@ The complete dataset is available as CSV files under the [csv/](csv) folder in t
 
 ## License
 
-The historical Open Database License notice in this repository should be treated as applying to the legacy CSV snapshots already present under [`csv/`](csv), and possibly to the original repository contents published with that notice, because the upstream repository did not clearly separate code and data licensing.
-
-Generated release assets produced by the GitHub Actions workflows — including the monthly `Projects_<STATE>.csv.7z`, `Projects_<STATE>.geojsonl.7z`, `Projects_<STATE>.parquet`, and run metadata files — follow the data licensing guidance used in [`indianopenmaps/DATA_LICENSE.md`](https://github.com/ramSeraph/indianopenmaps/blob/main/DATA_LICENSE.md): [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/) with requested attribution to the Datameet community and the original government source where possible.
-
-Users of this data should also attribute Parivesh: https://parivesh.nic.in/
+This india-environmental-approvals dataset is made available under the Open Database License: http://opendatacommons.org/licenses/odbl/1.0/. 
+Users of this data should attribute Parivesh: https://parivesh.nic.in/
 
 You are free:
 
@@ -37,6 +34,12 @@ As long as you:
 * **Attribute**: You must attribute any public use of the database, or works produced from the database, in the manner specified in the ODbL. For any use or redistribution of the database, or works produced from it, you must make clear to others the license of the database and keep intact any notices on the original database.
 * **Share-Alike**: If you publicly use any adapted version of this database, or works produced from an adapted database, you must also offer that adapted database under the ODbL.
 * **Keep open**: If you redistribute the database, or an adapted version of it, then you may use technological measures that restrict the work (such as DRM) as long as you also redistribute a version without such measures.
+
+## Data in releases
+
+The license section above is the original repository notice and should be preserved as-is. In practice, treat it as applying to the legacy checked-in data under [`csv/`](csv), and possibly to the original repository contents published with that notice, because the upstream repository did not clearly separate code and data licensing.
+
+Generated release assets produced by the GitHub Actions workflows — including the monthly `Projects_<STATE>.csv.7z`, `Projects_<STATE>.geojsonl.7z`, `Projects_<STATE>.parquet`, and run metadata files — follow the data licensing guidance used in [`indianopenmaps/DATA_LICENSE.md`](https://github.com/ramSeraph/indianopenmaps/blob/main/DATA_LICENSE.md): [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/) with requested attribution to the Datameet community and the original government source where possible.
 
 ## Generating
 

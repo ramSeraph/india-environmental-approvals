@@ -31,42 +31,59 @@ release_exists() {
 render_release_notes() {
   local json_file="$1"
   local notes_file="$2"
-  python3 - <<'PY' "$json_file" "$notes_file" "$REPO" "$RUN_AT" "$RUN_MONTH" "$STATE_CODE" "$STATE_NAME" "$RELEASE_TAG"
+  local states_csv="states.csv"
+  python3 - <<'PY' "$json_file" "$notes_file" "$REPO" "$RUN_AT" "$RUN_MONTH" "$STATE_CODE" "$STATE_NAME" "$RELEASE_TAG" "$states_csv"
+import csv
 import json
 import re
 import sys
 from urllib.parse import quote
 
-json_file, notes_file, repo, run_at, run_month, state_code, state_name, release_tag = sys.argv[1:]
+json_file, notes_file, repo, run_at, run_month, state_code, state_name, release_tag, states_csv = sys.argv[1:]
 
 with open(json_file, "r", encoding="utf-8") as handle:
     payload = json.load(handle)
 
 assets = payload.get("assets") or []
 
-def asset_sort_key(name: str):
-    match = re.search(r"Projects_(\d+)", name)
-    return (int(match.group(1)) if match else 10**9, name)
-
 def asset_link(name: str) -> str:
     return f"https://github.com/{repo}/releases/download/{release_tag}/{quote(name)}"
 
-csv_assets = sorted(
-    [asset["name"] for asset in assets if asset["name"].endswith(".csv.7z")],
-    key=asset_sort_key,
-)
-geojsonl_assets = sorted(
-    [asset["name"] for asset in assets if asset["name"].endswith(".geojsonl.7z")],
-    key=asset_sort_key,
-)
-parquet_assets = sorted(
-    [asset["name"] for asset in assets if asset["name"].endswith(".parquet")],
-    key=asset_sort_key,
-)
-run_info_assets = sorted(
-    [asset["name"] for asset in assets if asset["name"].endswith("_run.txt")],
-    key=asset_sort_key,
-)
+state_names = {}
+with open(states_csv, "r", encoding="utf-8", newline="") as handle:
+    for row in csv.DictReader(handle):
+        code = row.get("State Code", "").strip()
+        name = row.get("State Name(In English)", "").strip()
+        if code and name:
+            state_names[code] = name
+
+grouped_assets = {}
+
+for asset in assets:
+    name = asset["name"]
+    match = re.search(r"Projects_(\d+)", name)
+    if not match:
+        continue
+
+    code = match.group(1)
+    state_entry = grouped_assets.setdefault(
+        code,
+        {
+            "csv": None,
+            "geojsonl": None,
+            "parquet": None,
+            "run_info": None,
+        },
+    )
+
+    if name.endswith(".csv.7z"):
+        state_entry["csv"] = name
+    elif name.endswith(".geojsonl.7z"):
+        state_entry["geojsonl"] = name
+    elif name.endswith(".parquet"):
+        state_entry["parquet"] = name
+    elif name.endswith("_run.txt"):
+        state_entry["run_info"] = name
 
 lines = [
     f"<!-- release-month:{run_month} -->",
@@ -76,43 +93,37 @@ lines = [
     f"- Most recent workflow: `{state_name}` (`{state_code}`)",
     "- Data license: [CC0 1.0 with requested attribution to Datameet and the original government source](https://github.com/ramSeraph/indianopenmaps/blob/main/DATA_LICENSE.md)",
     "",
-    "## CSV archives",
+    "## States",
 ]
 
-if csv_assets:
-    lines.extend(f"- [{name}]({asset_link(name)})" for name in csv_assets)
+if grouped_assets:
+    for code in sorted(grouped_assets, key=lambda value: (int(value), value)):
+        state_label = state_names.get(code, f"State {code}")
+        state_entry = grouped_assets[code]
+        lines.append(f"### {state_label} ({code})")
+        if state_entry["csv"]:
+            lines.append(f"- CSV archive: [{state_entry['csv']}]({asset_link(state_entry['csv'])})")
+        else:
+            lines.append("- CSV archive: not uploaded")
+
+        if state_entry["geojsonl"]:
+            lines.append(f"- GeoJSONL archive: [{state_entry['geojsonl']}]({asset_link(state_entry['geojsonl'])})")
+        else:
+            lines.append("- GeoJSONL archive: not uploaded")
+
+        if state_entry["parquet"]:
+            lines.append(f"- GeoParquet: [{state_entry['parquet']}]({asset_link(state_entry['parquet'])})")
+        else:
+            lines.append("- GeoParquet: not uploaded")
+
+        if state_entry["run_info"]:
+            lines.append(f"- Run metadata: [{state_entry['run_info']}]({asset_link(state_entry['run_info'])})")
+        else:
+            lines.append("- Run metadata: not uploaded")
+
+        lines.append("")
 else:
-    lines.append("- No CSV archives uploaded yet.")
-
-lines.extend([
-    "",
-    "## GeoJSONL archives",
-])
-
-if geojsonl_assets:
-    lines.extend(f"- [{name}]({asset_link(name)})" for name in geojsonl_assets)
-else:
-    lines.append("- No GeoJSONL archives uploaded yet.")
-
-lines.extend([
-    "",
-    "## GeoParquet files",
-])
-
-if parquet_assets:
-    lines.extend(f"- [{name}]({asset_link(name)})" for name in parquet_assets)
-else:
-    lines.append("- No GeoParquet files uploaded yet.")
-
-lines.extend([
-    "",
-    "## Run metadata",
-])
-
-if run_info_assets:
-    lines.extend(f"- [{name}]({asset_link(name)})" for name in run_info_assets)
-else:
-    lines.append("- No run metadata files uploaded yet.")
+    lines.append("- No state assets uploaded yet.")
 
 with open(notes_file, "w", encoding="utf-8") as handle:
     handle.write("\n".join(lines))

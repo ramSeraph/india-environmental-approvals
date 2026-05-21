@@ -27,23 +27,39 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            requirements.txt
+          cache-suffix: py311-state-pipeline
+
+      - name: Restore state pipeline cache
+        id: restore-state-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            raw/search_${{ inputs.state_code }}
+            raw/caf_${{ inputs.state_code }}
+            raw/parse_cache_${{ inputs.state_code }}
+            raw/shape_cache_${{ inputs.state_code }}
+            kml/${{ inputs.state_code }}
+            csv/Projects_${{ inputs.state_code }}.csv
+            geojson/Projects_${{ inputs.state_code }}.geojsonl
+          key: state-data-${{ runner.os }}-${{ inputs.state_code }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            state-data-${{ runner.os }}-${{ inputs.state_code }}-
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install --yes p7zip-full
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install "polars>=0.20.0" "aiohttp>=3.9.0"
 
       - name: Run state pipeline
         env:
@@ -51,8 +67,8 @@ jobs:
         run: |
           bash 1_initialize.sh "$STATE_CODE"
           bash 2_fetch.sh "$STATE_CODE"
-          python 3_parse.py "$STATE_CODE"
-          python 4_make_shape.py "$STATE_CODE"
+          uv run --with polars python 3_parse.py "$STATE_CODE"
+          uv run --with aiohttp python 4_make_shape.py "$STATE_CODE"
 
       - name: Prepare release assets
         env:
@@ -113,3 +129,17 @@ jobs:
             "dist/Projects_${{ inputs.state_code }}.geojsonl.7z" \
             "dist/Projects_${{ inputs.state_code }}.parquet" \
             "dist/Projects_${{ inputs.state_code }}_run.txt"
+
+      - name: Save state pipeline cache
+        if: always()
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            raw/search_${{ inputs.state_code }}
+            raw/caf_${{ inputs.state_code }}
+            raw/parse_cache_${{ inputs.state_code }}
+            raw/shape_cache_${{ inputs.state_code }}
+            kml/${{ inputs.state_code }}
+            csv/Projects_${{ inputs.state_code }}.csv
+            geojson/Projects_${{ inputs.state_code }}.geojsonl
+          key: state-data-${{ runner.os }}-${{ inputs.state_code }}-${{ github.run_id }}-${{ github.run_attempt }}
