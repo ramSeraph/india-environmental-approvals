@@ -191,8 +191,144 @@ def parse_kml_coordinates(coord_string: str) -> List[List[float]]:
         except (ValueError, IndexError):
             # Skip invalid coordinate triplets
             continue
-            
+             
     return coordinates
+
+def geometry_from_point(point_elem: Optional[ET.Element], ns: Dict[str, str]) -> Optional[Dict[str, Any]]:
+    """Convert a KML Point element to GeoJSON geometry."""
+    if point_elem is None:
+        return None
+
+    coords_elem = point_elem.find('./kml:coordinates', ns)
+    if coords_elem is None:
+        coords_elem = point_elem.find('./coordinates')
+
+    if coords_elem is None or not coords_elem.text:
+        return None
+
+    coords = parse_kml_coordinates(coords_elem.text)
+    if not coords:
+        return None
+
+    return {
+        "type": "Point",
+        "coordinates": coords[0]
+    }
+
+def geometry_from_linestring(linestring_elem: Optional[ET.Element], ns: Dict[str, str]) -> Optional[Dict[str, Any]]:
+    """Convert a KML LineString element to GeoJSON geometry."""
+    if linestring_elem is None:
+        return None
+
+    coords_elem = linestring_elem.find('./kml:coordinates', ns)
+    if coords_elem is None:
+        coords_elem = linestring_elem.find('./coordinates')
+
+    if coords_elem is None or not coords_elem.text:
+        return None
+
+    coords = parse_kml_coordinates(coords_elem.text)
+    if not coords:
+        return None
+
+    if len(coords) >= 2:
+        return {
+            "type": "LineString",
+            "coordinates": coords
+        }
+
+    return {
+        "type": "Point",
+        "coordinates": coords[0]
+    }
+
+def geometry_from_polygon(polygon_elem: Optional[ET.Element], ns: Dict[str, str]) -> Optional[Dict[str, Any]]:
+    """Convert a KML Polygon element to GeoJSON geometry."""
+    if polygon_elem is None:
+        return None
+
+    outer_coords = polygon_elem.find('./kml:outerBoundaryIs/kml:LinearRing/kml:coordinates', ns)
+    if outer_coords is None:
+        outer_coords = polygon_elem.find('./outerBoundaryIs/LinearRing/coordinates')
+
+    if outer_coords is None or not outer_coords.text:
+        return None
+
+    coords = parse_kml_coordinates(outer_coords.text)
+    if len(coords) < 3:
+        return None
+
+    if coords[0] != coords[-1]:
+        coords.append(coords[0])
+
+    if len(coords) < 4:
+        return None
+
+    geometry = {
+        "type": "Polygon",
+        "coordinates": [coords]
+    }
+
+    inner_boundaries = polygon_elem.findall('./kml:innerBoundaryIs/kml:LinearRing/kml:coordinates', ns)
+    if not inner_boundaries:
+        inner_boundaries = polygon_elem.findall('./innerBoundaryIs/LinearRing/coordinates')
+
+    for inner in inner_boundaries:
+        if not inner.text:
+            continue
+
+        inner_coords = parse_kml_coordinates(inner.text)
+        if len(inner_coords) < 3:
+            continue
+
+        if inner_coords[0] != inner_coords[-1]:
+            inner_coords.append(inner_coords[0])
+
+        if len(inner_coords) >= 4:
+            geometry["coordinates"].append(inner_coords)
+
+    return geometry
+
+def extract_placemark_geometries(placemark: ET.Element, ns: Dict[str, str]) -> List[Dict[str, Any]]:
+    """Extract all supported geometries from a Placemark."""
+    geometries: List[Dict[str, Any]] = []
+
+    multigeometries = placemark.findall('./kml:MultiGeometry', ns)
+    if not multigeometries:
+        multigeometries = placemark.findall('./MultiGeometry')
+
+    if multigeometries:
+        for multigeometry in multigeometries:
+            for point in multigeometry.findall('./kml:Point', ns) or multigeometry.findall('./Point'):
+                geometry = geometry_from_point(point, ns)
+                if geometry is not None:
+                    geometries.append(geometry)
+
+            for linestring in multigeometry.findall('./kml:LineString', ns) or multigeometry.findall('./LineString'):
+                geometry = geometry_from_linestring(linestring, ns)
+                if geometry is not None:
+                    geometries.append(geometry)
+
+            for polygon in multigeometry.findall('./kml:Polygon', ns) or multigeometry.findall('./Polygon'):
+                geometry = geometry_from_polygon(polygon, ns)
+                if geometry is not None:
+                    geometries.append(geometry)
+
+        return geometries
+
+    geometry = geometry_from_point(placemark.find('./kml:Point', ns) or placemark.find('./Point'), ns)
+    if geometry is not None:
+        geometries.append(geometry)
+
+    geometry = geometry_from_linestring(placemark.find('./kml:LineString', ns) or placemark.find('./LineString'), ns)
+    if geometry is not None:
+        geometries.append(geometry)
+
+    geometry = geometry_from_polygon(placemark.find('./kml:Polygon', ns) or placemark.find('./Polygon'), ns)
+    if geometry is not None:
+        geometries.append(geometry)
+
+    return geometries
 
 def kml_to_geojson_feature(kml_path: Path, csv_row: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Convert KML file to GeoJSON features with CSV attributes"""
@@ -244,79 +380,15 @@ def kml_to_geojson_feature(kml_path: Path, csv_row: Dict[str, Any]) -> List[Dict
             if desc_elem is not None and desc_elem.text:
                 feature["properties"]["kml_description"] = desc_elem.text
             
-            # Handle different geometry types
-            
-            # Point
-            point = placemark.find('.//kml:Point/kml:coordinates', ns)
-            if point is None:
-                point = placemark.find('.//Point/coordinates')
-            if point is not None and point.text:
-                coords = parse_kml_coordinates(point.text)
-                if coords:
-                    feature["geometry"] = {
-                        "type": "Point",
-                        "coordinates": coords[0]
-                    }
-            
-            # LineString
-            linestring = placemark.find('.//kml:LineString/kml:coordinates', ns)
-            if linestring is None:
-                linestring = placemark.find('.//LineString/coordinates')
-            if linestring is not None and linestring.text:
-                coords = parse_kml_coordinates(linestring.text)
-                if coords:
-                    # Validate LineString has at least 2 points
-                    if len(coords) >= 2:
-                        feature["geometry"] = {
-                            "type": "LineString",
-                            "coordinates": coords
-                        }
-                    elif len(coords) == 1:
-                        # Convert single-point LineString to Point
-                        feature["geometry"] = {
-                            "type": "Point",
-                            "coordinates": coords[0]
-                        }
-            
-            # Polygon
-            polygon = placemark.find('.//kml:Polygon', ns)
-            if polygon is None:
-                polygon = placemark.find('.//Polygon')
-            if polygon is not None:
-                # Outer boundary
-                outer_coords = polygon.find('.//kml:outerBoundaryIs/kml:LinearRing/kml:coordinates', ns)
-                if outer_coords is None:
-                    outer_coords = polygon.find('.//outerBoundaryIs/LinearRing/coordinates')
-                
-                if outer_coords is not None and outer_coords.text:
-                    coords = parse_kml_coordinates(outer_coords.text)
-                    if coords:
-                        # Validate polygon has at least 3 unique points (4 including closure)
-                        if len(coords) >= 3:
-                            # Close the polygon if not already closed
-                            if coords[0] != coords[-1]:
-                                coords.append(coords[0])
-                            
-                            # Final validation - must have at least 4 points after closing
-                            if len(coords) >= 4:
-                                feature["geometry"] = {
-                                    "type": "Polygon",
-                                    "coordinates": [coords]
-                                }
-                                
-                                # Handle inner boundaries (holes)
-                                inner_boundaries = polygon.findall('.//kml:innerBoundaryIs/kml:LinearRing/kml:coordinates', ns)
-                                if not inner_boundaries:
-                                    inner_boundaries = polygon.findall('.//innerBoundaryIs/LinearRing/coordinates')
-                                
-                                for inner in inner_boundaries:
-                                    if inner.text:
-                                        inner_coords = parse_kml_coordinates(inner.text)
-                                        if inner_coords and len(inner_coords) >= 3:
-                                            if inner_coords[0] != inner_coords[-1]:
-                                                inner_coords.append(inner_coords[0])
-                                            if len(inner_coords) >= 4:
-                                                feature["geometry"]["coordinates"].append(inner_coords)
+            placemark_geometries = extract_placemark_geometries(placemark, ns)
+
+            if len(placemark_geometries) == 1:
+                feature["geometry"] = placemark_geometries[0]
+            elif len(placemark_geometries) > 1:
+                feature["geometry"] = {
+                    "type": "GeometryCollection",
+                    "geometries": placemark_geometries,
+                }
             
             # Only add features with valid geometry
             if feature["geometry"] is not None:
