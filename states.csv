@@ -1,0 +1,37 @@
+S.No.,State Code,State Version,State Name(In English),State Name (In Local),Census 2001 Code,Census 2011 Code,State or UT
+1.0,35,1,Andaman And Nicobar Islands,Andaman And Nicobar Islands,35,35,U
+2.0,28,2,Andhra Pradesh,Andhra Pradesh,28,28,S
+3.0,12,1,Arunachal Pradesh,Arunachal Pradesh,12,12,S
+4.0,18,1,Assam,Assam,18,18,S
+5.0,10,1,Bihar,Bihar,10,10,S
+6.0,4,1,Chandigarh,Chandigarh,04,04,U
+7.0,22,1,Chhattisgarh,Chhattisgarh,22,22,S
+8.0,7,1,Delhi,Delhi,07,07,U
+9.0,30,1,Goa,Goa,30,30,S
+10.0,24,1,Gujarat,Gujarat,24,24,S
+11.0,6,1,Haryana,Haryana,06,06,S
+12.0,2,1,Himachal Pradesh,Himachal Pradesh,02,02,S
+13.0,1,3,Jammu And Kashmir,Jammu And Kashmir,01,01,U
+14.0,20,1,Jharkhand,Jharkhand,20,20,S
+15.0,29,1,Karnataka,Karnataka,29,29,S
+16.0,32,1,Kerala,Kerala,32,32,S
+17.0,37,1,Ladakh,Ladakh,,00,U
+18.0,31,1,Lakshadweep,Lakshadweep,31,31,U
+19.0,23,1,Madhya Pradesh,Madhya Pradesh,23,23,S
+20.0,27,1,Maharashtra,Maharashtra,27,27,S
+21.0,14,1,Manipur,Manipur,14,14,S
+22.0,17,1,Meghalaya,Meghalaya,17,17,S
+23.0,15,1,Mizoram,Mizoram,15,15,S
+24.0,13,1,Nagaland,Nagaland,13,13,S
+25.0,21,1,Odisha,Odisha,21,21,S
+26.0,34,1,Puducherry,Puducherry,34,34,U
+27.0,3,1,Punjab,Punjab,03,03,S
+28.0,8,1,Rajasthan,Rajasthan,08,08,S
+29.0,11,1,Sikkim,Sikkim,11,11,S
+30.0,33,1,Tamil Nadu,Tamil Nadu,33,33,S
+31.0,36,1,Telangana,Telangana,,00,S
+32.0,38,1,The Dadra And Nagar Haveli And Daman And Diu,The Dadra And Nagar Haveli And Daman And Diu,,,U
+33.0,16,1,Tripura,Tripura,16,16,S
+34.0,5,1,Uttarakhand,Uttarakhand,05,05,S
+35.0,9,1,Uttar Pradesh,Uttar Pradesh,09,09,S
+36.0,19,1,West Bengal,West Bengal,19,19,S
