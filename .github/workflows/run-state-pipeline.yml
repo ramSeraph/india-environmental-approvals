@@ -49,7 +49,7 @@ jobs:
           path: |
             .tooling/bin
             .tooling/src/tippecanoe
-          key: geospatial-tools-${{ runner.os }}-tippecanoe-v1.9.2-pmtiles-v1.30.2
+          key: geospatial-tools-${{ runner.os }}-tippecanoe-cb6cacef152e649d4500af1f4fa9b4c8f1f98d64-pmtiles-v1.30.2
 
       - name: Restore state pipeline cache
         id: restore-state-cache
@@ -84,7 +84,7 @@ jobs:
       - name: Install geospatial tools
         env:
           PMTILES_VERSION: "1.30.2"
-          TIPPECANOE_VERSION: "1.9.2"
+          TIPPECANOE_REF: "cb6cacef152e649d4500af1f4fa9b4c8f1f98d64"
         run: |
           mkdir -p .tooling/bin .tooling/src
           echo "${GITHUB_WORKSPACE}/.tooling/bin" >> "$GITHUB_PATH"
@@ -99,7 +99,11 @@ jobs:
 
           if [ ! -x .tooling/bin/tippecanoe ] || [ ! -x .tooling/bin/tile-join ]; then
             rm -rf .tooling/src/tippecanoe
-            git clone --depth 1 --branch "v${TIPPECANOE_VERSION}" https://github.com/felt/tippecanoe.git .tooling/src/tippecanoe
+            curl -L --silent --show-error \
+              "https://github.com/felt/tippecanoe/archive/${TIPPECANOE_REF}.tar.gz" \
+              -o /tmp/tippecanoe.tar.gz
+            tar -xzf /tmp/tippecanoe.tar.gz -C .tooling/src
+            mv ".tooling/src/tippecanoe-${TIPPECANOE_REF}" .tooling/src/tippecanoe
             make -C .tooling/src/tippecanoe -j"$(nproc)"
             cp .tooling/src/tippecanoe/tippecanoe .tooling/bin/
             cp .tooling/src/tippecanoe/tile-join .tooling/bin/
@@ -179,7 +183,7 @@ jobs:
           path: |
             .tooling/bin
             .tooling/src/tippecanoe
-          key: geospatial-tools-${{ runner.os }}-tippecanoe-v1.9.2-pmtiles-v1.30.2
+          key: geospatial-tools-${{ runner.os }}-tippecanoe-cb6cacef152e649d4500af1f4fa9b4c8f1f98d64-pmtiles-v1.30.2
 
       - name: Publish release assets
         env:
