@@ -50,6 +50,13 @@ def check_runtime_budget(context: str) -> None:
     if deadline_epoch - time.time() <= 0:
         raise DeadlineExceeded(f"Pipeline runtime budget exceeded before {context}")
 
+def get_env_float(name: str, default: float) -> float:
+    """Return an environment override as float when present."""
+    value = os.environ.get(name)
+    if value in (None, ""):
+        return default
+    return float(value)
+
 def generate_kml_filename(url: str) -> str:
     """Generate filename from KML URL parameters"""
     try:
@@ -180,6 +187,8 @@ def batch_download_kmls(downloads: List[Tuple[str, str]], staging_root: Path) ->
         http_method='GET',
         staging_root=str(staging_root),
         deadline_epoch=get_deadline_epoch(),
+        min_retry_delay_seconds=get_env_float("KML_MIN_RETRY_DELAY", 1.0),
+        max_retry_delay_seconds=get_env_float("KML_MAX_RETRY_DELAY", 3.0),
     )
 
     urls_to_download = downloader.filter_existing_files(downloads)

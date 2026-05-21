@@ -28,7 +28,21 @@ class DeadlineExceeded(RuntimeError):
     """Raised when the pipeline runtime budget has been exhausted."""
 
 class ParallelDownloader:
-    def __init__(self, min_batch_size=5, max_batch_size=20, min_delay=1.0, max_delay=5.0, max_concurrent=10, content_type='json', http_method='POST', timestamp_file=None, staging_root=None, deadline_epoch=None):
+    def __init__(
+        self,
+        min_batch_size=5,
+        max_batch_size=20,
+        min_delay=1.0,
+        max_delay=5.0,
+        max_concurrent=10,
+        content_type='json',
+        http_method='POST',
+        timestamp_file=None,
+        staging_root=None,
+        deadline_epoch=None,
+        min_retry_delay_seconds=1.0,
+        max_retry_delay_seconds=3.0,
+    ):
         self.min_batch_size = min_batch_size
         self.max_batch_size = max_batch_size
         self.min_delay = min_delay
@@ -54,7 +68,8 @@ class ParallelDownloader:
         self.failed = 0
         self.force_redownloaded = 0
         self.max_5xx_retries = 5
-        self.retry_delay_seconds = 2.0
+        self.min_retry_delay_seconds = min_retry_delay_seconds
+        self.max_retry_delay_seconds = max_retry_delay_seconds
 
     def check_deadline(self, context: str):
         """Fail fast once the workflow's runtime budget has been exhausted."""
@@ -248,13 +263,17 @@ class ParallelDownloader:
                             return True
 
                         if 500 <= response.status <= 599 and attempt < self.max_5xx_retries:
+                            retry_delay_seconds = random.uniform(
+                                self.min_retry_delay_seconds,
+                                self.max_retry_delay_seconds,
+                            )
                             print(
                                 f"HTTP {response.status} for {url}; "
-                                f"retrying in {self.retry_delay_seconds:.1f}s "
+                                f"retrying in {retry_delay_seconds:.1f}s "
                                 f"({attempt + 1}/{self.max_5xx_retries})"
                             )
                             self.check_deadline(f"retrying {output_path}")
-                            await asyncio.sleep(self.retry_delay_seconds)
+                            await asyncio.sleep(retry_delay_seconds)
                             continue
 
                         print(f"HTTP {response.status} for {url}")
@@ -347,6 +366,8 @@ def main():
     parser.add_argument('--timestamp-file', type=str, help='JSON file containing timestamp data for comparison')
     parser.add_argument('--staging-root', type=str, help='Directory used for staged downloads before moving into place')
     parser.add_argument('--deadline-epoch', type=int, help='Unix epoch after which downloads should stop')
+    parser.add_argument('--min-retry-delay', type=float, default=1.0, help='Minimum delay before retrying 5xx responses (default: 1.0)')
+    parser.add_argument('--max-retry-delay', type=float, default=3.0, help='Maximum delay before retrying 5xx responses (default: 3.0)')
     
     args = parser.parse_args()
     
@@ -361,6 +382,8 @@ def main():
         timestamp_file=args.timestamp_file,
         staging_root=args.staging_root,
         deadline_epoch=args.deadline_epoch,
+        min_retry_delay_seconds=args.min_retry_delay,
+        max_retry_delay_seconds=args.max_retry_delay,
     )
     
     # Parse URLs

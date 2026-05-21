@@ -15,6 +15,8 @@ MAX_BATCH_SIZE=${MAX_BATCH_SIZE:-153}
 MIN_DELAY=${MIN_DELAY:-0.1}
 MAX_DELAY=${MAX_DELAY:-2}
 MAX_CONCURRENT=${MAX_CONCURRENT:-35}
+MIN_RETRY_DELAY=${MIN_RETRY_DELAY:-1}
+MAX_RETRY_DELAY=${MAX_RETRY_DELAY:-3}
 
 IFS=$'\n'
 
@@ -190,6 +192,7 @@ fi
 echo "Starting parallel download with configuration:"
 echo "  Batch size: $MIN_BATCH_SIZE-$MAX_BATCH_SIZE"
 echo "  Delay between batches: ${MIN_DELAY}s-${MAX_DELAY}s" 
+echo "  Retry delay on 5xx: ${MIN_RETRY_DELAY}s-${MAX_RETRY_DELAY}s"
 echo "  Max concurrent downloads: $MAX_CONCURRENT"
 echo ""
 
@@ -203,6 +206,8 @@ uv run request.py "$URL_FILE" \
   --max-batch-size "$MAX_BATCH_SIZE" \
   --min-delay "$MIN_DELAY" \
   --max-delay "$MAX_DELAY" \
+  --min-retry-delay "$MIN_RETRY_DELAY" \
+  --max-retry-delay "$MAX_RETRY_DELAY" \
   --max-concurrent "$MAX_CONCURRENT" \
   --staging-root "$STAGE_DIR/downloads" \
   --timestamp-file "$TIMESTAMP_FILE" \

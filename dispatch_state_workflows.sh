@@ -29,12 +29,13 @@ normalize_code() {
   printf "%02d" "$((10#$1))"
 }
 
-declare -A DONE_SET=()
+normalized_done_codes=""
+
 if [[ -n "${DONE_CODES}" ]]; then
   IFS=',' read -r -a done_items <<< "${DONE_CODES}"
   for code in "${done_items[@]}"; do
     [[ -n "${code}" ]] || continue
-    DONE_SET["$(normalize_code "${code}")"]=1
+    normalized_done_codes="${normalized_done_codes:+${normalized_done_codes},}$(normalize_code "${code}")"
   done
 fi
 
@@ -43,13 +44,37 @@ if [[ -n "${ACTIVE_CODE}" ]]; then
 fi
 
 declare -a STATE_ORDER=()
-declare -A STATE_NAMES=()
-declare -A WORKFLOW_FILES=()
+STATE_METADATA_FILE="$(mktemp)"
+
+cleanup() {
+  rm -f "${STATE_METADATA_FILE}"
+}
+
+trap cleanup EXIT
+
+done_code_contains() {
+  local needle="$1"
+  case ",${normalized_done_codes:-}," in
+    *,"${needle}",*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+state_field_for_code() {
+  local code="$1"
+  local field_index="$2"
+
+  awk -F '\t' -v code="${code}" -v field_index="${field_index}" '
+    $1 == code {
+      print $field_index
+      exit
+    }
+  ' "${STATE_METADATA_FILE}"
+}
 
 while IFS=$'\t' read -r code name workflow_file; do
   STATE_ORDER+=("${code}")
-  STATE_NAMES["${code}"]="${name}"
-  WORKFLOW_FILES["${code}"]="${workflow_file}"
+  printf '%s\t%s\t%s\n' "${code}" "${name}" "${workflow_file}" >> "${STATE_METADATA_FILE}"
 done < <(
   python3 - <<'PY'
 import csv
@@ -175,8 +200,10 @@ dispatch_new_run() {
 process_state() {
   local code="$1"
   local reuse_current="$2"
-  local name="${STATE_NAMES[${code}]}"
-  local workflow_file="${WORKFLOW_FILES[${code}]}"
+  local name
+  local workflow_file
+  name="$(state_field_for_code "${code}" 2)"
+  workflow_file="$(state_field_for_code "${code}" 3)"
   local workflow_name="Run ${name} pipeline"
 
   if [[ ! -f "${WORKFLOW_DIR}/${workflow_file}" ]]; then
@@ -184,7 +211,7 @@ process_state() {
     exit 1
   fi
 
-  if [[ -n "${DONE_SET[${code}]:-}" ]]; then
+  if done_code_contains "${code}"; then
     echo "Skipping ${name} (${code}); marked done."
     return 0
   fi
