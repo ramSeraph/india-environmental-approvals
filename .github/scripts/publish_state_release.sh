@@ -94,8 +94,6 @@ for asset in assets:
 
 lines = [
     f"<!-- release-month:{run_month} -->",
-    f"# Datasets {run_month}",
-    "",
     f"- Last update: `{run_at}`",
     f"- Most recent workflow: `{state_name}` (`{state_code}`)",
     "- Data license: [CC0 1.0 with requested attribution to Datameet and the original government source](https://github.com/ramSeraph/indianopenmaps/blob/main/DATA_LICENSE.md)",
@@ -168,8 +166,6 @@ RELEASE_NOTES="$TMP_DIR/release-notes.md"
 
 cat >"$INITIAL_NOTES" <<EOF
 <!-- release-month:${RUN_MONTH} -->
-# ${RELEASE_TITLE}
-
 - Last update: \`${RUN_AT}\`
 - Most recent workflow: \`${STATE_NAME}\` (\`${STATE_CODE}\`)
 EOF
