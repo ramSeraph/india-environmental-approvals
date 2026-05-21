@@ -56,8 +56,6 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: |
-            raw/search_${{ inputs.state_code }}
-            raw/caf_${{ inputs.state_code }}
             kml/${{ inputs.state_code }}
             csv
             geojson
@@ -78,11 +76,23 @@ jobs:
           bash 1_initialize.sh "$STATE_CODE"
           bash 2_fetch.sh "$STATE_CODE"
 
+      - name: Drop search data
+        env:
+          STATE_CODE: ${{ inputs.state_code }}
+        run: |
+          rm -rf "raw/search_${STATE_CODE}"
+
       - name: Parse state data
         env:
           STATE_CODE: ${{ inputs.state_code }}
         run: |
           uv run --with polars python 3_parse.py "$STATE_CODE"
+
+      - name: Drop CAF data
+        env:
+          STATE_CODE: ${{ inputs.state_code }}
+        run: |
+          rm -rf "raw/caf_${STATE_CODE}"
 
       - name: Drop parse cache
         env:
@@ -262,8 +272,6 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: |
-            raw/search_${{ inputs.state_code }}
-            raw/caf_${{ inputs.state_code }}
             kml/${{ inputs.state_code }}
             csv
             geojson
