@@ -6,6 +6,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: state-pipeline-queue
+  cancel-in-progress: false
+
 jobs:
   run:
     uses: ./.github/workflows/run-state-pipeline.yml
