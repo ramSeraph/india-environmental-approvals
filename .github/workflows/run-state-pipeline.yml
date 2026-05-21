@@ -23,9 +23,9 @@ jobs:
   run-state-pipeline:
     name: Run pipeline for ${{ inputs.state_name }}
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 150
     env:
-      PIPELINE_MAX_RUNTIME_SECONDS: "14400"
+      PIPELINE_MAX_RUNTIME_SECONDS: "9000"
 
     steps:
       - name: Set runtime deadline
