@@ -1,4 +1,9 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# dependencies = [
+#   "aiohttp>=3.9.0",
+# ]
+# ///
 """
 Generic parallelized batch downloader.
 Handles batch processing with configurable delays and concurrent requests.

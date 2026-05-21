@@ -1,0 +1,14 @@
+name: Run Tripura pipeline
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    uses: ./.github/workflows/run-state-pipeline.yml
+    with:
+      state_code: "16"
+      state_name: "Tripura"

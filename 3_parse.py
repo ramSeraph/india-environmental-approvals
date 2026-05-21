@@ -2,14 +2,23 @@ import os
 import json
 import polars as pl
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
-from typing import Dict, Any, Union
+from typing import Dict, Any, Union, Optional
+
+PARSE_CACHE_VERSION = 1
 
 def get_directory_path(state: str = None) -> str:
     """Get the appropriate directory path based on state parameter."""
     if state:
         return f"raw/caf_{state.lower()}"
     return "raw/caf"
+
+def get_cache_directory_path(state: str = None) -> str:
+    """Get the cache directory path for parsed CAF payloads."""
+    if state:
+        return f"raw/parse_cache_{state.lower()}"
+    return "raw/parse_cache"
 
 # Get state parameter from command line arguments
 state_param = sys.argv[1] if len(sys.argv) > 1 else None
@@ -24,6 +33,56 @@ if not os.path.exists(directory):
 def recursive_find_json(directory: str) -> list[str]:
     """Recursively finds JSON files in the given directory."""
     return [os.path.join(root, file) for root, _, files in os.walk(directory) for file in files if file.endswith('.json')]
+
+def get_cache_file_path(file_path: str, source_directory: str, cache_directory: str) -> str:
+    """Map a source CAF file to its cache entry path."""
+    relative_path = os.path.relpath(file_path, source_directory)
+    return os.path.join(cache_directory, relative_path)
+
+def load_cached_parse_result(file_path: str, cache_file_path: str) -> Optional[Dict[str, Any]]:
+    """Load a cached parse result when the source file has not changed."""
+    if not os.path.exists(cache_file_path):
+        return None
+
+    try:
+        source_stat = os.stat(file_path)
+        with open(cache_file_path, 'r', encoding='utf-8') as cache_file:
+            cached_data = json.load(cache_file)
+
+        if cached_data.get('cache_version') != PARSE_CACHE_VERSION:
+            return None
+
+        if cached_data.get('source_size') != source_stat.st_size:
+            return None
+
+        if cached_data.get('source_mtime_ns') != source_stat.st_mtime_ns:
+            return None
+
+        parsed = cached_data.get('parsed')
+        if isinstance(parsed, dict):
+            return parsed
+    except (json.JSONDecodeError, OSError, TypeError):
+        return None
+
+    return None
+
+def write_cached_parse_result(file_path: str, cache_file_path: str, parsed_result: Dict[str, Any]) -> None:
+    """Persist a parsed result for reuse on later runs."""
+    source_stat = os.stat(file_path)
+    os.makedirs(os.path.dirname(cache_file_path), exist_ok=True)
+
+    payload = {
+        'cache_version': PARSE_CACHE_VERSION,
+        'source_size': source_stat.st_size,
+        'source_mtime_ns': source_stat.st_mtime_ns,
+        'parsed': parsed_result,
+    }
+
+    temp_file_path = f"{cache_file_path}.tmp"
+    with open(temp_file_path, 'w', encoding='utf-8') as cache_file:
+        json.dump(payload, cache_file, ensure_ascii=False)
+
+    os.replace(temp_file_path, cache_file_path)
 
 def parse_xml_content(xml_string: str) -> Dict[str, Any]:
     """Parse XML content and extract fields."""
@@ -368,17 +427,38 @@ def main():
         return
     
     print(f"Processing {len(json_files)} files...")
+    cache_directory = get_cache_directory_path(state_param)
+    os.makedirs(cache_directory, exist_ok=True)
+    print(f"Using parse cache: {cache_directory}")
     
     # Use Polars to efficiently process the data
     data_list = []
+    parsed_files = 0
+    cached_files = 0
+    failed_files = 0
     for file_path in json_files:
+        cache_file_path = get_cache_file_path(file_path, directory, cache_directory)
+        cached_result = load_cached_parse_result(file_path, cache_file_path)
+
+        if cached_result is not None:
+            cached_files += 1
+            if cached_result:
+                data_list.append(cached_result)
+            continue
+
         result = parse_json(file_path)
         if result:  # Only add non-empty results
             data_list.append(result)
+            write_cached_parse_result(file_path, cache_file_path, result)
+            parsed_files += 1
+        else:
+            failed_files += 1
     
     if not data_list:
         print("No valid data found to process")
         return
+
+    print(f"Parse summary: parsed={parsed_files} reused_cache={cached_files} failed={failed_files}")
     
     # Normalize data - ensure all records have all possible fields
     # This is necessary because Polars excludes columns that are missing from most records
@@ -542,8 +622,16 @@ def main():
         output_file = "csv/Projects.csv"
         print("Processing data for all states")
     
-    # Write to CSV
-    df.write_csv(output_file)
+    # Write to CSV atomically so interrupted runs do not leave a partial file behind.
+    temp_fd, temp_output_file = tempfile.mkstemp(prefix=os.path.basename(output_file), suffix=".tmp", dir=os.path.dirname(output_file) or ".")
+    os.close(temp_fd)
+    try:
+        df.write_csv(temp_output_file)
+        os.replace(temp_output_file, output_file)
+    finally:
+        if os.path.exists(temp_output_file):
+            os.remove(temp_output_file)
+
     print(f"Data saved to {output_file}")
     print(f"Total records: {len(df)}")
 

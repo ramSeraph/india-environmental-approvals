@@ -3,15 +3,21 @@
 make_shape.py - Convert CSV environmental approvals data to GeoJSON with existing KML files
 """
 
+import asyncio
 import os
 import sys
 import csv
 import json
+import hashlib
+import tempfile
 import urllib.parse
-import subprocess
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from xml.etree import ElementTree as ET
+
+from request import ParallelDownloader
+
+SHAPE_CACHE_VERSION = 1
 
 def generate_kml_filename(url: str) -> str:
     """Generate filename from KML URL parameters"""
@@ -28,56 +34,134 @@ def generate_kml_filename(url: str) -> str:
         import hashlib
         return f"kml_{hashlib.md5(url.encode()).hexdigest()[:8]}.kml"
 
-def generate_kml_url_file(csv_path: str, url_file_path: str, kml_dir: Path) -> int:
-    """Generate URL file for batch downloading KML files"""
-    url_count = 0
-    
+def collect_kml_downloads(csv_path: str, kml_dir: Path) -> List[Tuple[str, str]]:
+    """Collect KML download URLs and destination paths from the CSV."""
+    downloads: List[Tuple[str, str]] = []
+
     with open(csv_path, 'r', encoding='utf-8') as csvfile:
         reader = csv.DictReader(csvfile)
-        
-        with open(url_file_path, 'w') as url_file:
-            for row in reader:
-                project_id = row.get('ID', '')
-                kml_urls_str = row.get('KML URLs', '')
-                
-                if not kml_urls_str:
-                    continue
-                    
-                # Parse multiple URLs separated by semicolon
-                kml_urls = [url.strip() for url in kml_urls_str.split(';') if url.strip()]
-                
-                for url in kml_urls:
-                    # Create project-specific output path
-                    filename = generate_kml_filename(url)
-                    output_path = kml_dir / project_id / filename
-                    
-                    # Write URL and output path to file (tab-separated)
-                    url_file.write(f"{url}\t{output_path}\n")
-                    url_count += 1
-    
-    return url_count
 
-def batch_download_kmls(url_file_path: str) -> bool:
-    """Use request.py to batch download KML files"""
+        for row in reader:
+            project_id = row.get('ID', '')
+            kml_urls_str = row.get('KML URLs', '')
+
+            if not kml_urls_str:
+                continue
+
+            # Parse multiple URLs separated by semicolon
+            kml_urls = [url.strip() for url in kml_urls_str.split(';') if url.strip()]
+
+            for url in kml_urls:
+                filename = generate_kml_filename(url)
+                output_path = kml_dir / project_id / filename
+                downloads.append((url, str(output_path)))
+
+    return downloads
+
+def get_shape_cache_dir(state: str = "") -> Path:
+    """Return the cache directory for per-project shape output."""
+    if state:
+        return Path(f"raw/shape_cache_{state}")
+    return Path("raw/shape_cache")
+
+def build_row_signature(row: Dict[str, Any]) -> str:
+    """Create a stable signature for a CSV row."""
+    normalized_row = {key: row.get(key, "") for key in sorted(row.keys())}
+    payload = json.dumps(normalized_row, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+def get_project_cache_path(cache_dir: Path, project_id: str) -> Path:
+    """Return the cache file path for a project."""
+    cache_key = project_id or "unknown-project"
+    return cache_dir / f"{cache_key}.json"
+
+def collect_kml_input_metadata(kml_paths: List[Path]) -> List[Dict[str, Any]]:
+    """Capture enough metadata to know when cached feature output is stale."""
+    metadata = []
+    for kml_path in sorted(kml_paths):
+        stat = kml_path.stat()
+        metadata.append({
+            "path": str(kml_path),
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        })
+    return metadata
+
+def load_cached_project_features(
+    cache_path: Path,
+    row_signature: str,
+    kml_metadata: List[Dict[str, Any]],
+) -> Optional[List[Dict[str, Any]]]:
+    """Load cached features if the CSV row and KML inputs are unchanged."""
+    if not cache_path.exists():
+        return None
+
     try:
-        # Call request.py with appropriate parameters for KML downloads
-        cmd = [
-            'python3', 'request.py', url_file_path,
-            '--content-type', 'kml',
-            '--http-method', 'GET',
-            '--min-batch-size', '5',
-            '--max-batch-size', '15',
-            '--min-delay', '1.0', 
-            '--max-delay', '3.0',
-            '--max-concurrent', '8'
-        ]
-        
-        result = subprocess.run(cmd, capture_output=False, text=True)
-        return result.returncode == 0
-        
-    except Exception as e:
-        print(f"Error running batch downloader: {e}")
-        return False
+        with open(cache_path, "r", encoding="utf-8") as cache_file:
+            cache_payload = json.load(cache_file)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    if cache_payload.get("cache_version") != SHAPE_CACHE_VERSION:
+        return None
+
+    if cache_payload.get("row_signature") != row_signature:
+        return None
+
+    if cache_payload.get("kml_inputs") != kml_metadata:
+        return None
+
+    features = cache_payload.get("features")
+    if isinstance(features, list):
+        return features
+
+    return None
+
+def write_cached_project_features(
+    cache_path: Path,
+    row_signature: str,
+    kml_metadata: List[Dict[str, Any]],
+    features: List[Dict[str, Any]],
+) -> None:
+    """Persist per-project feature output for resumable reruns."""
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "cache_version": SHAPE_CACHE_VERSION,
+        "row_signature": row_signature,
+        "kml_inputs": kml_metadata,
+        "features": features,
+    }
+
+    temp_path = cache_path.with_suffix(f"{cache_path.suffix}.tmp")
+    with open(temp_path, "w", encoding="utf-8") as cache_file:
+        json.dump(payload, cache_file, ensure_ascii=False)
+    os.replace(temp_path, cache_path)
+
+def batch_download_kmls(downloads: List[Tuple[str, str]]) -> bool:
+    """Download KML files using the shared downloader module."""
+    downloader = ParallelDownloader(
+        min_batch_size=5,
+        max_batch_size=15,
+        min_delay=1.0,
+        max_delay=3.0,
+        max_concurrent=8,
+        content_type='kml',
+        http_method='GET'
+    )
+
+    urls_to_download = downloader.filter_existing_files(downloads)
+    print(f"Skipped {downloader.skipped} existing KML files")
+    print(f"Need to download {len(urls_to_download)} KML files")
+
+    if urls_to_download:
+        asyncio.run(downloader.process_downloads(urls_to_download))
+
+    print("\nKML Download Summary:")
+    print(f"  Downloaded: {downloader.downloaded}")
+    print(f"  Skipped (existing): {downloader.skipped}")
+    print(f"  Failed: {downloader.failed}")
+
+    return downloader.failed == 0
 
 def parse_kml_coordinates(coord_string: str) -> List[List[float]]:
     """Parse KML coordinate string into list of [lon, lat] pairs
@@ -245,105 +329,121 @@ def kml_to_geojson_feature(kml_path: Path, csv_row: Dict[str, Any]) -> List[Dict
     
     return features
 
-def process_csv_to_geojson(csv_path: str, output_path: str = "geojsonoutput.geojson", state: str = ""):
-    """Main function to process CSV and create GeoJSON by batch downloading KML files"""
+def process_csv_to_geojsonl(csv_path: str, output_path: str = "geojsonoutput.geojsonl", state: str = ""):
+    """Process CSV and create a GeoJSONL file using resumable per-project caches."""
     
     # Use state-specific KML directory if state is provided
     if state:
         kml_dir = Path(f"kml/{state}")
     else:
         kml_dir = Path("kml")
-    
-    # Generate URL file for batch downloading
-    url_file_path = f"kml_urls_{state}.txt" if state else "kml_urls_all.txt"
+    cache_dir = get_shape_cache_dir(state)
+    cache_dir.mkdir(parents=True, exist_ok=True)
     
     print("Generating KML URL list for batch downloading...")
-    url_count = generate_kml_url_file(csv_path, url_file_path, kml_dir)
-    print(f"Generated {url_count} KML URLs")
+    downloads = collect_kml_downloads(csv_path, kml_dir)
+    print(f"Generated {len(downloads)} KML URLs")
     
-    if url_count == 0:
+    if not downloads:
         print("No KML URLs found in CSV file")
         return
     
-    # Batch download KML files using request.py
+    # Batch download KML files using the shared downloader logic
     print("\nStarting batch download of KML files...")
-    download_success = batch_download_kmls(url_file_path)
+    download_success = batch_download_kmls(downloads)
     
     if not download_success:
         print("Warning: Batch download encountered errors. Continuing with available files...")
     
-    # Clean up URL file
-    try:
-        os.remove(url_file_path)
-    except OSError:
-        pass
-    
     # Process downloaded KML files into GeoJSON
-    print("\nProcessing KML files to GeoJSON...")
-    all_features = []
+    print("\nProcessing KML files to GeoJSONL...")
+    processed_count = 0
+    reused_cache_count = 0
+    generated_count = 0
+    feature_count = 0
+
+    output_dir = os.path.dirname(output_path) or "."
+    os.makedirs(output_dir, exist_ok=True)
+    temp_fd, temp_output_path = tempfile.mkstemp(
+        prefix=os.path.basename(output_path),
+        suffix=".tmp",
+        dir=output_dir,
+    )
+    os.close(temp_fd)
     
-    # Read CSV file again to process each row
-    with open(csv_path, 'r', encoding='utf-8') as csvfile:
-        reader = csv.DictReader(csvfile)
-        rows = list(reader)
-        total_projects = len(rows)
-        processed_count = 0
-        
-        for row_idx, row in enumerate(rows, 1):
-            proposal_id = row.get('Proposal Number', '')
-            project_id = row.get('ID', '')
-            kml_urls_str = row.get('KML URLs', '')
-            
-            if not kml_urls_str:
-                continue
+    try:
+        with open(temp_output_path, "w", encoding="utf-8") as output_file:
+            # Read CSV file again to process each row
+            with open(csv_path, 'r', encoding='utf-8') as csvfile:
+                reader = csv.DictReader(csvfile)
+                rows = list(reader)
+                total_projects = len(rows)
                 
-            # Parse multiple URLs separated by semicolon
-            kml_urls = [url.strip() for url in kml_urls_str.split(';') if url.strip()]
-            
-            if not kml_urls:
-                continue
-            
-            print(f"Processing {proposal_id} (ID: {project_id}) ({row_idx}/{total_projects}) with {len(kml_urls)} KML file(s)")
-            
-            # Process each KML file for this project
-            project_has_features = False
-            for url in kml_urls:
-                # Generate the expected file path
-                filename = generate_kml_filename(url)
-                kml_path = kml_dir / project_id / filename
-                
-                if kml_path.exists():
-                    # Convert KML to GeoJSON features
-                    features = kml_to_geojson_feature(kml_path, row)
-                    if features:
-                        all_features.extend(features)
-                        project_has_features = True
-                else:
-                    print(f"  Warning: KML file not found: {kml_path}")
-            
-            if project_has_features:
-                processed_count += 1
-    
+                for row_idx, row in enumerate(rows, 1):
+                    proposal_id = row.get('Proposal Number', '')
+                    project_id = row.get('ID', '')
+                    kml_urls_str = row.get('KML URLs', '')
+                    
+                    if not kml_urls_str:
+                        continue
+                        
+                    # Parse multiple URLs separated by semicolon
+                    kml_urls = [url.strip() for url in kml_urls_str.split(';') if url.strip()]
+                    
+                    if not kml_urls:
+                        continue
+                    
+                    print(f"Processing {proposal_id} (ID: {project_id}) ({row_idx}/{total_projects}) with {len(kml_urls)} KML file(s)")
+
+                    existing_kml_paths: List[Path] = []
+                    for url in kml_urls:
+                        filename = generate_kml_filename(url)
+                        kml_path = kml_dir / project_id / filename
+
+                        if kml_path.exists():
+                            existing_kml_paths.append(kml_path)
+                        else:
+                            print(f"  Warning: KML file not found: {kml_path}")
+
+                    if not existing_kml_paths:
+                        continue
+
+                    row_signature = build_row_signature(row)
+                    kml_metadata = collect_kml_input_metadata(existing_kml_paths)
+                    cache_path = get_project_cache_path(cache_dir, project_id)
+                    project_features = load_cached_project_features(cache_path, row_signature, kml_metadata)
+
+                    if project_features is None:
+                        project_features = []
+                        for kml_path in existing_kml_paths:
+                            project_features.extend(kml_to_geojson_feature(kml_path, row))
+                        write_cached_project_features(cache_path, row_signature, kml_metadata, project_features)
+                        generated_count += 1
+                    else:
+                        reused_cache_count += 1
+
+                    if project_features:
+                        processed_count += 1
+                        for feature in project_features:
+                            output_file.write(json.dumps(feature, ensure_ascii=False))
+                            output_file.write("\n")
+                            feature_count += 1
+
+        os.replace(temp_output_path, output_path)
+    finally:
+        if os.path.exists(temp_output_path):
+            os.remove(temp_output_path)
+
     print(f"Processed {processed_count} projects with valid geometry")
-    
-    # Create GeoJSON
-    geojson = {
-        "type": "FeatureCollection",
-        "features": all_features
-    }
-    
-    # Write GeoJSON file
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(geojson, f, indent=2, ensure_ascii=False)
-    
-    print(f"Created {output_path} with {len(all_features)} features")
+    print(f"Shape cache summary: generated={generated_count} reused_cache={reused_cache_count}")
+    print(f"Created {output_path} with {feature_count} features")
 
 def main():
     """Main entry point"""
     if len(sys.argv) < 2:
         print("Usage: python 4_make_shape.py <STATE> [output_file]")
         print("Example: python 4_make_shape.py 30")
-        print("This will read csv/Projects_30.csv and output to geojson/Projects_30.geojson")
+        print("This will read csv/Projects_30.csv and output to geojson/Projects_30.geojsonl")
         sys.exit(1)
     
     state = sys.argv[1]
@@ -356,7 +456,7 @@ def main():
     else:
         # Create geojson directory if it doesn't exist
         os.makedirs("geojson", exist_ok=True)
-        output_path = f"geojson/Projects_{state}.geojson"
+        output_path = f"geojson/Projects_{state}.geojsonl"
     
     if not os.path.exists(csv_path):
         print(f"Error: CSV file {csv_path} not found")
@@ -368,7 +468,7 @@ def main():
     print(f"KML files will be saved to: kml/{state}/$ID/")
     print()
     
-    process_csv_to_geojson(csv_path, output_path, state)
+    process_csv_to_geojsonl(csv_path, output_path, state)
 
 if __name__ == "__main__":
     main()

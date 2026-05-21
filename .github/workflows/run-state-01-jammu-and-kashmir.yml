@@ -1,0 +1,14 @@
+name: Run Jammu And Kashmir pipeline
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    uses: ./.github/workflows/run-state-pipeline.yml
+    with:
+      state_code: "1"
+      state_name: "Jammu And Kashmir"

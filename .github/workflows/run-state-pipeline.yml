@@ -1,0 +1,115 @@
+name: Run state pipeline
+
+on:
+  workflow_call:
+    inputs:
+      state_code:
+        description: LGD state code from states.csv
+        required: true
+        type: string
+      state_name:
+        description: State name from states.csv
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: latest-release-publish
+  cancel-in-progress: false
+
+jobs:
+  run-state-pipeline:
+    name: Run pipeline for ${{ inputs.state_name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install --yes p7zip-full
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "polars>=0.20.0" "aiohttp>=3.9.0"
+
+      - name: Run state pipeline
+        env:
+          STATE_CODE: ${{ inputs.state_code }}
+        run: |
+          bash 1_initialize.sh "$STATE_CODE"
+          bash 2_fetch.sh "$STATE_CODE"
+          python 3_parse.py "$STATE_CODE"
+          python 4_make_shape.py "$STATE_CODE"
+
+      - name: Prepare release assets
+        env:
+          GPIO_VERSION: "0.9.0"
+          STATE_CODE: ${{ inputs.state_code }}
+          STATE_NAME: ${{ inputs.state_name }}
+        run: |
+          mkdir -p dist
+
+          csv_file="csv/Projects_${STATE_CODE}.csv"
+          geojsonl_file="geojson/Projects_${STATE_CODE}.geojsonl"
+          parquet_file="dist/Projects_${STATE_CODE}.parquet"
+          run_info_file="dist/Projects_${STATE_CODE}_run.txt"
+
+          if [ ! -f "$csv_file" ]; then
+            echo "Missing expected CSV output: $csv_file" >&2
+            exit 1
+          fi
+
+          if [ ! -f "$geojsonl_file" ]; then
+            echo "Missing expected GeoJSONL output: $geojsonl_file" >&2
+            exit 1
+          fi
+
+          uvx --from "geoparquet-io==${GPIO_VERSION}" gpio convert \
+            --geoparquet-version 1.1 \
+            --compression zstd \
+            --compression-level 22 \
+            "$geojsonl_file" \
+            "$parquet_file"
+
+          {
+            echo "State Code: ${STATE_CODE}"
+            echo "State Name: ${STATE_NAME}"
+            echo "Workflow: ${GITHUB_WORKFLOW}"
+            echo "Run ID: ${GITHUB_RUN_ID}"
+            echo "Run Attempt: ${GITHUB_RUN_ATTEMPT}"
+            echo "Commit SHA: ${GITHUB_SHA}"
+            echo "Completed At (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "CSV Output: ${csv_file}"
+            echo "GeoJSONL Output: ${geojsonl_file}"
+            echo "GeoParquet Output: ${parquet_file}"
+          } >"$run_info_file"
+
+          7z a -bd -mx=9 "dist/Projects_${STATE_CODE}.csv.7z" "$csv_file"
+          7z a -bd -mx=9 "dist/Projects_${STATE_CODE}.geojsonl.7z" "$geojsonl_file"
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          chmod +x .github/scripts/publish_state_release.sh
+          .github/scripts/publish_state_release.sh \
+            "${{ inputs.state_code }}" \
+            "${{ inputs.state_name }}" \
+            "dist/Projects_${{ inputs.state_code }}.csv.7z" \
+            "dist/Projects_${{ inputs.state_code }}.geojsonl.7z" \
+            "dist/Projects_${{ inputs.state_code }}.parquet" \
+            "dist/Projects_${{ inputs.state_code }}_run.txt"

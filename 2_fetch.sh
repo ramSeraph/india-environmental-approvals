@@ -1,7 +1,12 @@
 #!/bin/bash
 
+set -uo pipefail
+
 # State parameter - should match the one used in initialize.sh
 STATE=${1:-""}
+FAILURES=0
+SEARCH_FILES_FOUND=0
+TEMP_FILES=()
 
 # Parallelization parameters
 MIN_BATCH_SIZE=${MIN_BATCH_SIZE:-37}
@@ -10,7 +15,28 @@ MIN_DELAY=${MIN_DELAY:-0.1}
 MAX_DELAY=${MAX_DELAY:-2}
 MAX_CONCURRENT=${MAX_CONCURRENT:-35}
 
-IFS=$'\n';
+IFS=$'\n'
+
+cleanup_temp_files() {
+  local temp_file
+  for temp_file in "${TEMP_FILES[@]}"; do
+    rm -f "$temp_file"
+  done
+}
+
+is_valid_json_file() {
+  local file_path="$1"
+
+  [ -s "$file_path" ] || return 1
+
+  python3 - <<'PY' "$file_path"
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    json.load(handle)
+PY
+}
 
 # Determine search directory based on state parameter
 if [ -n "$STATE" ]; then
@@ -33,22 +59,15 @@ fi
 
 mkdir -p "$CAF_DIR"
 
-# Check if Python and required modules are available
-if ! command -v python3 &> /dev/null; then
-  echo "Error: python3 is required for parallel downloading"
-  exit 1
-fi
+trap cleanup_temp_files EXIT
 
-# Check if aiohttp is available
-if ! python3 -c "import aiohttp" 2>/dev/null; then
-  echo "Error: aiohttp module is required. Install with: pip install aiohttp"
+# Check if uv is available for the inline-dependency downloader script
+if ! command -v uv &> /dev/null; then
+  echo "Error: uv is required to run request.py"
   exit 1
 fi
 
 echo "Generating URL list for parallel downloading..."
-
-# Remove old URL file if it exists
-rm -f "$URL_FILE"
 
 # Create combined timestamp file for comparison
 if [ -n "$STATE" ]; then
@@ -59,16 +78,51 @@ fi
 
 echo "Creating combined timestamp file: $TIMESTAMP_FILE"
 
-# Use jq to combine all search files into one with all data arrays merged
-jq -s '{"data": ([.[] | .data // []] | add)}' $SEARCH_DIR/*.json > "$TIMESTAMP_FILE" 2>/dev/null || echo '{"data":[]}' > "$TIMESTAMP_FILE"
+URL_FILE_TMP="$(mktemp "${URL_FILE}.XXXXXX.tmp")"
+TIMESTAMP_FILE_TMP="$(mktemp "${TIMESTAMP_FILE}.XXXXXX.tmp")"
+TEMP_FILES+=("$URL_FILE_TMP" "$TIMESTAMP_FILE_TMP")
+
+VALID_SEARCH_FILES=()
+for clearance in {1..4}; do
+  SEARCH_FILE="$SEARCH_DIR/${clearance}.json"
+
+  if [ ! -e "$SEARCH_FILE" ]; then
+    echo "Warning: No data file found at $SEARCH_FILE, skipping clearance type $clearance"
+    continue
+  fi
+
+  SEARCH_FILES_FOUND=$((SEARCH_FILES_FOUND + 1))
+
+  if ! is_valid_json_file "$SEARCH_FILE"; then
+    echo "Warning: Invalid JSON in $SEARCH_FILE, skipping clearance type $clearance"
+    FAILURES=$((FAILURES + 1))
+    continue
+  fi
+
+  VALID_SEARCH_FILES+=("$SEARCH_FILE")
+done
+
+if [ "$SEARCH_FILES_FOUND" -eq 0 ]; then
+  echo "Error: No search files found in $SEARCH_DIR. Please run initialize.sh first."
+  exit 1
+fi
+
+if [ "${#VALID_SEARCH_FILES[@]}" -gt 0 ]; then
+  jq -s '{"data": ([.[] | .data // []] | add)}' "${VALID_SEARCH_FILES[@]}" > "$TIMESTAMP_FILE_TMP"
+else
+  printf '{"data":[]}\n' > "$TIMESTAMP_FILE_TMP"
+fi
 
 # First pass: count total proposals and generate URL file
 total_proposals_all=0
 for clearance in {1..4}; do
   SEARCH_FILE="$SEARCH_DIR/${clearance}.json"
   
-  if [ ! -s "$SEARCH_FILE" ]; then
-    echo "Warning: No data file found at $SEARCH_FILE, skipping clearance type $clearance"
+  if [ ! -e "$SEARCH_FILE" ]; then
+    continue
+  fi
+
+  if ! is_valid_json_file "$SEARCH_FILE"; then
     continue
   fi
   
@@ -77,7 +131,7 @@ for clearance in {1..4}; do
   echo "Processing clearance type $clearance..."
   
   # Extract all proposal IDs and generate URLs
-  proposal_ids=$(cat "$SEARCH_FILE" | jq -r '.data[] | select(.id != null) | .id' 2>/dev/null || echo "")
+  proposal_ids=$(jq -r '.data[]? | select(.id != null) | .id' "$SEARCH_FILE" 2>/dev/null || echo "")
   
   if [ -z "$proposal_ids" ]; then
     echo "  No valid proposal IDs found in $SEARCH_FILE"
@@ -89,18 +143,25 @@ for clearance in {1..4}; do
     output_path="$CAF_DIR/${clearance}/${proposal_id}.json"
     
     # Add to URL file (tab-separated)
-    echo -e "${url}\t${output_path}" >> "$URL_FILE"
+    printf "%s\t%s\n" "$url" "$output_path" >> "$URL_FILE_TMP"
     total_proposals_all=$((total_proposals_all + 1))
   done
 done
 
+mv "$URL_FILE_TMP" "$URL_FILE"
+mv "$TIMESTAMP_FILE_TMP" "$TIMESTAMP_FILE"
 echo "Generated URL list with $total_proposals_all proposals"
 echo ""
 
 # Check if URL file was created and has content
 if [ ! -s "$URL_FILE" ]; then
-  echo "Error: No URLs generated. Check your search files."
-  exit 1
+  if [ "$FAILURES" -gt 0 ]; then
+    echo "Error: No URLs generated because all valid search files were skipped or invalid."
+    exit 1
+  fi
+
+  echo "No proposal URLs found. Nothing to fetch."
+  exit 0
 fi
 
 # Run the parallel downloader
@@ -110,7 +171,7 @@ echo "  Delay between batches: ${MIN_DELAY}s-${MAX_DELAY}s"
 echo "  Max concurrent downloads: $MAX_CONCURRENT"
 echo ""
 
-python3 request.py "$URL_FILE" \
+uv run request.py "$URL_FILE" \
   --min-batch-size "$MIN_BATCH_SIZE" \
   --max-batch-size "$MAX_BATCH_SIZE" \
   --min-delay "$MIN_DELAY" \
@@ -131,4 +192,5 @@ else
   echo ""
   echo "Warning: Parallel download script exited with code $download_exit_code"
   echo "Some downloads may have failed. You may want to re-run this script."
+  exit "$download_exit_code"
 fi

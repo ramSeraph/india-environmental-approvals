@@ -1,0 +1,14 @@
+name: Run Andhra Pradesh pipeline
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    uses: ./.github/workflows/run-state-pipeline.yml
+    with:
+      state_code: "28"
+      state_name: "Andhra Pradesh"

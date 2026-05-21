@@ -15,13 +15,16 @@ The complete dataset is available as CSV files under the [csv/](csv) folder in t
 - [1_initialize.sh](1_initialize.sh): Initializes the list of projects to be fetched
 - [2_fetch.sh](2_fetch.sh): Fetches the details of each project
 - [3_parse.py](3_parse.py): Parses the project files, and saves project details as a CSV file
-- [4_make_shape.py](4_make_shape.py): Downloads the linked kml for each application and compiles it into a single geojson with all the csv attributes
+- [4_make_shape.py](4_make_shape.py): Downloads the linked kml for each application and compiles it into GeoJSONL features with all the csv attributes
 - [5_combine_geojson.py](5_combine_geojson.py): Combines the geojson for every state into a single `india-environmental-approvals.gpkg`
 
 ## License
 
-This india-environmental-approvals dataset is made available under the Open Database License: http://opendatacommons.org/licenses/odbl/1.0/. 
-Users of this data should attribute Parivesh: https://parivesh.nic.in/
+The historical Open Database License notice in this repository should be treated as applying to the legacy CSV snapshots already present under [`csv/`](csv), and possibly to the original repository contents published with that notice, because the upstream repository did not clearly separate code and data licensing.
+
+Generated release assets produced by the GitHub Actions workflows — including the monthly `Projects_<STATE>.csv.7z`, `Projects_<STATE>.geojsonl.7z`, `Projects_<STATE>.parquet`, and run metadata files — follow the data licensing guidance used in [`indianopenmaps/DATA_LICENSE.md`](https://github.com/ramSeraph/indianopenmaps/blob/main/DATA_LICENSE.md): [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/) with requested attribution to the Datameet community and the original government source where possible.
+
+Users of this data should also attribute Parivesh: https://parivesh.nic.in/
 
 You are free:
 
@@ -111,6 +114,10 @@ python parse.py
 ```
 
 The fetch script sources data from Parivesh (https://parivesh.nic.in/)
+
+## GitHub Actions
+
+Manual GitHub Actions workflows are available for each state LGD code in `states.csv`. Each workflow runs the first four pipeline steps for one state, converts the resulting GeoJSONL into GeoParquet, compresses the `Projects_<STATE>.csv` and `Projects_<STATE>.geojsonl` files with 7-Zip, and uploads those archives plus `Projects_<STATE>.parquet` and a per-run metadata text file to the current month’s immutable GitHub release (`datasets-YYYY-MM`). The newest month release is marked as GitHub’s Latest release.
 
 ## TODO
 

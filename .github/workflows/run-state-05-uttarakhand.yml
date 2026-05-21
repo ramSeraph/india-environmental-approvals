@@ -1,0 +1,14 @@
+name: Run Uttarakhand pipeline
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    uses: ./.github/workflows/run-state-pipeline.yml
+    with:
+      state_code: "5"
+      state_name: "Uttarakhand"

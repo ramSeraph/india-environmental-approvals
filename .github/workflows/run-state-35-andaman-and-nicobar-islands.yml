@@ -1,0 +1,14 @@
+name: Run Andaman And Nicobar Islands pipeline
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    uses: ./.github/workflows/run-state-pipeline.yml
+    with:
+      state_code: "35"
+      state_name: "Andaman And Nicobar Islands"
