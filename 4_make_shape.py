@@ -9,6 +9,7 @@ import sys
 import csv
 import json
 import hashlib
+import shutil
 import tempfile
 import urllib.parse
 from pathlib import Path
@@ -18,6 +19,19 @@ from xml.etree import ElementTree as ET
 from request import ParallelDownloader
 
 SHAPE_CACHE_VERSION = 1
+
+
+def get_stage_root() -> Path:
+    """Return the shared uncached staging root."""
+    return Path(
+        os.environ.get(
+            "STAGE_ROOT",
+            os.path.join(
+                os.environ.get("RUNNER_TEMP", os.path.join(os.getcwd(), ".staging")),
+                "india-environmental-approvals-staging",
+            ),
+        )
+    )
 
 def generate_kml_filename(url: str) -> str:
     """Generate filename from KML URL parameters"""
@@ -137,7 +151,7 @@ def write_cached_project_features(
         json.dump(payload, cache_file, ensure_ascii=False)
     os.replace(temp_path, cache_path)
 
-def batch_download_kmls(downloads: List[Tuple[str, str]]) -> bool:
+def batch_download_kmls(downloads: List[Tuple[str, str]], staging_root: Path) -> bool:
     """Download KML files using the shared downloader module."""
     downloader = ParallelDownloader(
         min_batch_size=5,
@@ -146,7 +160,8 @@ def batch_download_kmls(downloads: List[Tuple[str, str]]) -> bool:
         max_delay=3.0,
         max_concurrent=8,
         content_type='kml',
-        http_method='GET'
+        http_method='GET',
+        staging_root=str(staging_root),
     )
 
     urls_to_download = downloader.filter_existing_files(downloads)
@@ -411,6 +426,9 @@ def process_csv_to_geojsonl(csv_path: str, output_path: str = "geojsonoutput.geo
         kml_dir = Path("kml")
     cache_dir = get_shape_cache_dir(state)
     cache_dir.mkdir(parents=True, exist_ok=True)
+    stage_dir = get_stage_root() / f"kml-{state or 'all'}"
+    shutil.rmtree(stage_dir, ignore_errors=True)
+    stage_dir.mkdir(parents=True, exist_ok=True)
     
     print("Generating KML URL list for batch downloading...")
     downloads = collect_kml_downloads(csv_path, kml_dir)
@@ -422,7 +440,7 @@ def process_csv_to_geojsonl(csv_path: str, output_path: str = "geojsonoutput.geo
     
     # Batch download KML files using the shared downloader logic
     print("\nStarting batch download of KML files...")
-    download_success = batch_download_kmls(downloads)
+    download_success = batch_download_kmls(downloads, stage_dir / "downloads")
     
     if not download_success:
         print("Warning: Batch download encountered errors. Continuing with available files...")

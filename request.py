@@ -18,13 +18,14 @@ import sys
 import random
 import argparse
 import ssl
+import shutil
 from pathlib import Path
 from typing import List, Tuple, Optional
 import time
 from datetime import datetime
 
 class ParallelDownloader:
-    def __init__(self, min_batch_size=5, max_batch_size=20, min_delay=1.0, max_delay=5.0, max_concurrent=10, content_type='json', http_method='POST', timestamp_file=None):
+    def __init__(self, min_batch_size=5, max_batch_size=20, min_delay=1.0, max_delay=5.0, max_concurrent=10, content_type='json', http_method='POST', timestamp_file=None, staging_root=None):
         self.min_batch_size = min_batch_size
         self.max_batch_size = max_batch_size
         self.min_delay = min_delay
@@ -34,6 +35,7 @@ class ParallelDownloader:
         self.http_method = http_method.upper()
         self.semaphore = asyncio.Semaphore(max_concurrent)
         self.timestamp_file = timestamp_file
+        self.staging_root = Path(staging_root) if staging_root else None
         self.timestamps_data = {}
         
         # Load timestamp data if provided
@@ -174,17 +176,33 @@ class ParallelDownloader:
             filtered.append((url, output_path))
         
         return filtered
+
+    def get_staging_path(self, output_path: str) -> str:
+        """Return the staging path for an output file."""
+        if self.staging_root is None:
+            return f"{output_path}.tmp"
+
+        output = Path(output_path)
+        if output.is_absolute():
+            relative_output = output.relative_to(output.anchor)
+        else:
+            relative_output = output
+
+        return str(self.staging_root / relative_output)
     
     async def download_single(self, session: aiohttp.ClientSession, url: str, output_path: str) -> bool:
         """Download a single file with retry logic"""
         async with self.semaphore:
-            temp_path = f"{output_path}.tmp"
+            temp_path = self.get_staging_path(output_path)
             
             try:
                 # Ensure output directory exists
                 output_dir = os.path.dirname(output_path)
                 if output_dir:  # Only create if there's actually a directory part
                     os.makedirs(output_dir, exist_ok=True)
+                staging_dir = os.path.dirname(temp_path)
+                if staging_dir:
+                    os.makedirs(staging_dir, exist_ok=True)
                 
                 # Use appropriate HTTP method
                 request_method = session.post if self.http_method == 'POST' else session.get
@@ -209,7 +227,7 @@ class ParallelDownloader:
                             with open(temp_path, 'w') as f:
                                 f.write(content)
                             
-                            os.rename(temp_path, output_path)
+                            shutil.move(temp_path, output_path)
                             self.downloaded += 1
                             return True
 
@@ -304,6 +322,7 @@ def main():
     parser.add_argument('--content-type', type=str, default='json', choices=['json', 'kml'], help='Content type for validation (default: json)')
     parser.add_argument('--http-method', type=str, default='POST', choices=['GET', 'POST'], help='HTTP method to use (default: POST)')
     parser.add_argument('--timestamp-file', type=str, help='JSON file containing timestamp data for comparison')
+    parser.add_argument('--staging-root', type=str, help='Directory used for staged downloads before moving into place')
     
     args = parser.parse_args()
     
@@ -315,7 +334,8 @@ def main():
         max_concurrent=args.max_concurrent,
         content_type=args.content_type,
         http_method=args.http_method,
-        timestamp_file=args.timestamp_file
+        timestamp_file=args.timestamp_file,
+        staging_root=args.staging_root
     )
     
     # Parse URLs

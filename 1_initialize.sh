@@ -7,6 +7,7 @@ FORCE=${FORCE:-0}
 FAILURES=0
 SKIPPED=0
 FETCHED=0
+STAGE_ROOT=${STAGE_ROOT:-${RUNNER_TEMP:-${PWD}/.staging}/india-environmental-approvals-staging}
 
 is_valid_json_file() {
   local file_path="$1"
@@ -25,17 +26,21 @@ PY
 # Create output directory with state suffix if filtering by state
 if [ -n "$STATE" ]; then
   OUTPUT_DIR="raw/search_${STATE}"
+  STAGE_DIR="${STAGE_ROOT}/initialize-${STATE}"
   echo "Fetching data for state: $STATE"
 else
   OUTPUT_DIR="raw/search"
+  STAGE_DIR="${STAGE_ROOT}/initialize-all"
   echo "Fetching data for all states"
 fi
 
 mkdir -p "$OUTPUT_DIR"
+rm -rf "$STAGE_DIR"
+mkdir -p "$STAGE_DIR"
 
 for clearance in {1..4}; do
   OUTPUT_FILE="$OUTPUT_DIR/${clearance}.json"
-  TEMP_FILE="${OUTPUT_FILE}.tmp"
+  TEMP_FILE="${STAGE_DIR}/${clearance}.json"
   API_URL="https://parivesh.nic.in/parivesh_api/trackYourProposal/advanceSearchData?majorClearanceType=${clearance}&state=${STATE}&sector=&proposalStatus=&proposalType=&issuingAuthority=&activityId=&category=&startDate=&endDate=&areaMin=&areaMax=&text="
 
   if [ "$FORCE" != "1" ] && is_valid_json_file "$OUTPUT_FILE"; then

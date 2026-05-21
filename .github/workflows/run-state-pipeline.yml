@@ -58,11 +58,10 @@ jobs:
           path: |
             raw/search_${{ inputs.state_code }}
             raw/caf_${{ inputs.state_code }}
-            raw/parse_cache_${{ inputs.state_code }}
-            raw/shape_cache_${{ inputs.state_code }}
             kml/${{ inputs.state_code }}
-            csv/Projects_${{ inputs.state_code }}.csv
-            geojson/Projects_${{ inputs.state_code }}.geojsonl
+            csv
+            geojson
+            dist
           key: state-data-${{ runner.os }}-${{ inputs.state_code }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             state-data-${{ runner.os }}-${{ inputs.state_code }}-
@@ -72,14 +71,36 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes build-essential curl libsqlite3-dev p7zip-full pkg-config zlib1g-dev
 
-      - name: Run state pipeline
+      - name: Initialize and fetch state data
         env:
           STATE_CODE: ${{ inputs.state_code }}
         run: |
           bash 1_initialize.sh "$STATE_CODE"
           bash 2_fetch.sh "$STATE_CODE"
+
+      - name: Parse state data
+        env:
+          STATE_CODE: ${{ inputs.state_code }}
+        run: |
           uv run --with polars python 3_parse.py "$STATE_CODE"
+
+      - name: Drop parse cache
+        env:
+          STATE_CODE: ${{ inputs.state_code }}
+        run: |
+          rm -rf "raw/parse_cache_${STATE_CODE}"
+
+      - name: Build state geometry
+        env:
+          STATE_CODE: ${{ inputs.state_code }}
+        run: |
           uv run --with aiohttp python 4_make_shape.py "$STATE_CODE"
+
+      - name: Drop shape cache
+        env:
+          STATE_CODE: ${{ inputs.state_code }}
+        run: |
+          rm -rf "raw/shape_cache_${STATE_CODE}"
 
       - name: Install geospatial tools
         env:
@@ -117,13 +138,25 @@ jobs:
         run: |
           export PATH="${GITHUB_WORKSPACE}/.tooling/bin:${PATH}"
           mkdir -p dist
+          stage_root="${RUNNER_TEMP:-${PWD}/.staging}/india-environmental-approvals-staging"
+          stage_dir="${stage_root}/state-${STATE_CODE}"
+          rm -rf "$stage_dir"
+          mkdir -p "$stage_dir"
+          trap 'rm -rf "$stage_dir"' EXIT
 
           csv_file="csv/Projects_${STATE_CODE}.csv"
           geojsonl_file="geojson/Projects_${STATE_CODE}.geojsonl"
           pmtiles_file="dist/Projects_${STATE_CODE}.pmtiles"
-          mbtiles_file="dist/Projects_${STATE_CODE}.mbtiles"
+          mbtiles_file="${stage_dir}/Projects_${STATE_CODE}.mbtiles"
+          pmtiles_stage_file="${stage_dir}/Projects_${STATE_CODE}.pmtiles"
           parquet_file="dist/Projects_${STATE_CODE}.parquet"
+          parquet_stage_file="${stage_dir}/Projects_${STATE_CODE}.parquet"
+          csv_archive="dist/Projects_${STATE_CODE}.csv.7z"
+          geojsonl_archive="dist/Projects_${STATE_CODE}.geojsonl.7z"
+          csv_archive_stage="${stage_dir}/Projects_${STATE_CODE}.csv.7z"
+          geojsonl_archive_stage="${stage_dir}/Projects_${STATE_CODE}.geojsonl.7z"
           run_info_file="dist/Projects_${STATE_CODE}_run.txt"
+          run_info_stage="${stage_dir}/Projects_${STATE_CODE}_run.txt"
 
           if [ ! -f "$csv_file" ]; then
             echo "Missing expected CSV output: $csv_file" >&2
@@ -135,29 +168,40 @@ jobs:
             exit 1
           fi
 
-          tippecanoe \
-            -P \
-            -S 10 \
-            --increase-gamma-as-needed \
-            -zg \
-            -o "$mbtiles_file" \
-            --simplify-only-low-zooms \
-            --coalesce-smallest-as-needed \
-            --extend-zooms-if-still-dropping \
-            -n "Projects ${STATE_NAME}" \
-            -l "projects_${STATE_CODE}" \
-            -A 'Source: <a href="https://parivesh.nic.in/" target="_blank" rel="noopener noreferrer">Parivesh</a>' \
-            "$geojsonl_file"
+          if [ -f "$pmtiles_file" ]; then
+            echo "Reusing cached PMTiles: $pmtiles_file"
+          else
+            rm -f "$pmtiles_stage_file" "$mbtiles_file"
+            tippecanoe \
+              -P \
+              -S 10 \
+              --increase-gamma-as-needed \
+              -zg \
+              -o "$mbtiles_file" \
+              --simplify-only-low-zooms \
+              --coalesce-smallest-as-needed \
+              --extend-zooms-if-still-dropping \
+              -n "Projects ${STATE_NAME}" \
+              -l "projects_${STATE_CODE}" \
+              -A 'Source: <a href="https://parivesh.nic.in/" target="_blank" rel="noopener noreferrer">Parivesh</a>' \
+              "$geojsonl_file"
+            pmtiles convert "$mbtiles_file" "$pmtiles_stage_file"
+            rm -f "$mbtiles_file"
+            mv "$pmtiles_stage_file" "$pmtiles_file"
+          fi
 
-          pmtiles convert "$mbtiles_file" "$pmtiles_file"
-          rm -f "$mbtiles_file"
-
-          uvx --from "geoparquet-io==${GPIO_VERSION}" gpio convert \
-            --geoparquet-version 1.1 \
-            --compression zstd \
-            --compression-level 22 \
-            "$geojsonl_file" \
-            "$parquet_file"
+          if [ -f "$parquet_file" ]; then
+            echo "Reusing cached GeoParquet: $parquet_file"
+          else
+            rm -f "$parquet_stage_file"
+            uvx --from "geoparquet-io==${GPIO_VERSION}" gpio convert \
+              --geoparquet-version 1.1 \
+              --compression zstd \
+              --compression-level 22 \
+              "$geojsonl_file" \
+              "$parquet_stage_file"
+            mv "$parquet_stage_file" "$parquet_file"
+          fi
 
           {
             echo "State Code: ${STATE_CODE}"
@@ -171,10 +215,14 @@ jobs:
             echo "GeoJSONL Output: ${geojsonl_file}"
             echo "PMTiles Output: ${pmtiles_file}"
             echo "GeoParquet Output: ${parquet_file}"
-          } >"$run_info_file"
+          } >"$run_info_stage"
+          mv "$run_info_stage" "$run_info_file"
 
-          7z a -bd -mx=9 "dist/Projects_${STATE_CODE}.csv.7z" "$csv_file"
-          7z a -bd -mx=9 "dist/Projects_${STATE_CODE}.geojsonl.7z" "$geojsonl_file"
+          rm -f "$csv_archive" "$geojsonl_archive" "$csv_archive_stage" "$geojsonl_archive_stage"
+          7z a -bd -mx=9 "$csv_archive_stage" "$csv_file"
+          7z a -bd -mx=9 "$geojsonl_archive_stage" "$geojsonl_file"
+          mv "$csv_archive_stage" "$csv_archive"
+          mv "$geojsonl_archive_stage" "$geojsonl_archive"
 
       - name: Save geospatial tools cache
         if: always() && steps.restore-tools-cache.outputs.cache-hit != 'true'
@@ -200,6 +248,15 @@ jobs:
             "dist/Projects_${{ inputs.state_code }}.parquet" \
             "dist/Projects_${{ inputs.state_code }}_run.txt"
 
+      - name: Drop release-only artifacts
+        env:
+          STATE_CODE: ${{ inputs.state_code }}
+        run: |
+          rm -f \
+            "dist/Projects_${STATE_CODE}.csv.7z" \
+            "dist/Projects_${STATE_CODE}.geojsonl.7z" \
+            "dist/Projects_${STATE_CODE}_run.txt"
+
       - name: Save state pipeline cache
         if: always()
         uses: actions/cache/save@v5
@@ -207,9 +264,28 @@ jobs:
           path: |
             raw/search_${{ inputs.state_code }}
             raw/caf_${{ inputs.state_code }}
-            raw/parse_cache_${{ inputs.state_code }}
-            raw/shape_cache_${{ inputs.state_code }}
             kml/${{ inputs.state_code }}
-            csv/Projects_${{ inputs.state_code }}.csv
-            geojson/Projects_${{ inputs.state_code }}.geojsonl
+            csv
+            geojson
+            dist
           key: state-data-${{ runner.os }}-${{ inputs.state_code }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Cleanup state data
+        if: always()
+        env:
+          STATE_CODE: ${{ inputs.state_code }}
+        run: |
+          rm -rf \
+            "raw/search_${STATE_CODE}" \
+            "raw/caf_${STATE_CODE}" \
+            "raw/parse_cache_${STATE_CODE}" \
+            "raw/shape_cache_${STATE_CODE}" \
+            "kml/${STATE_CODE}"
+          rm -f \
+            "csv/Projects_${STATE_CODE}.csv" \
+            "geojson/Projects_${STATE_CODE}.geojsonl" \
+            "dist/Projects_${STATE_CODE}.csv.7z" \
+            "dist/Projects_${STATE_CODE}.geojsonl.7z" \
+            "dist/Projects_${STATE_CODE}.pmtiles" \
+            "dist/Projects_${STATE_CODE}.parquet" \
+            "dist/Projects_${STATE_CODE}_run.txt"

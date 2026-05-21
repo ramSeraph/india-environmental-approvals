@@ -7,6 +7,7 @@ STATE=${1:-""}
 FAILURES=0
 SEARCH_FILES_FOUND=0
 TEMP_FILES=()
+STAGE_ROOT=${STAGE_ROOT:-${RUNNER_TEMP:-${PWD}/.staging}/india-environmental-approvals-staging}
 
 # Parallelization parameters
 MIN_BATCH_SIZE=${MIN_BATCH_SIZE:-37}
@@ -42,12 +43,14 @@ PY
 if [ -n "$STATE" ]; then
   SEARCH_DIR="raw/search_${STATE}"
   CAF_DIR="raw/caf_${STATE}"
-  URL_FILE="urls_${STATE}.txt"
+  STAGE_DIR="${STAGE_ROOT}/fetch-${STATE}"
+  URL_FILE="${STAGE_DIR}/urls_${STATE}.txt"
   echo "Processing data for state: $STATE"
 else
   SEARCH_DIR="raw/search"
   CAF_DIR="raw/caf"
-  URL_FILE="urls_all.txt"
+  STAGE_DIR="${STAGE_ROOT}/fetch-all"
+  URL_FILE="${STAGE_DIR}/urls_all.txt"
   echo "Processing data for all states"
 fi
 
@@ -58,6 +61,8 @@ if [ ! -d "$SEARCH_DIR" ]; then
 fi
 
 mkdir -p "$CAF_DIR"
+rm -rf "$STAGE_DIR"
+mkdir -p "$STAGE_DIR"
 
 trap cleanup_temp_files EXIT
 
@@ -71,9 +76,9 @@ echo "Generating URL list for parallel downloading..."
 
 # Create combined timestamp file for comparison
 if [ -n "$STATE" ]; then
-  TIMESTAMP_FILE="timestamps_${STATE}.json"
+  TIMESTAMP_FILE="${STAGE_DIR}/timestamps_${STATE}.json"
 else
-  TIMESTAMP_FILE="timestamps_all.json"
+  TIMESTAMP_FILE="${STAGE_DIR}/timestamps_all.json"
 fi
 
 echo "Creating combined timestamp file: $TIMESTAMP_FILE"
@@ -177,6 +182,7 @@ uv run request.py "$URL_FILE" \
   --min-delay "$MIN_DELAY" \
   --max-delay "$MAX_DELAY" \
   --max-concurrent "$MAX_CONCURRENT" \
+  --staging-root "$STAGE_DIR/downloads" \
   --timestamp-file "$TIMESTAMP_FILE"
 
 download_exit_code=$?
