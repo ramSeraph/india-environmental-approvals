@@ -24,8 +24,11 @@ from typing import List, Tuple, Optional
 import time
 from datetime import datetime
 
+class DeadlineExceeded(RuntimeError):
+    """Raised when the pipeline runtime budget has been exhausted."""
+
 class ParallelDownloader:
-    def __init__(self, min_batch_size=5, max_batch_size=20, min_delay=1.0, max_delay=5.0, max_concurrent=10, content_type='json', http_method='POST', timestamp_file=None, staging_root=None):
+    def __init__(self, min_batch_size=5, max_batch_size=20, min_delay=1.0, max_delay=5.0, max_concurrent=10, content_type='json', http_method='POST', timestamp_file=None, staging_root=None, deadline_epoch=None):
         self.min_batch_size = min_batch_size
         self.max_batch_size = max_batch_size
         self.min_delay = min_delay
@@ -36,6 +39,9 @@ class ParallelDownloader:
         self.semaphore = asyncio.Semaphore(max_concurrent)
         self.timestamp_file = timestamp_file
         self.staging_root = Path(staging_root) if staging_root else None
+        if deadline_epoch is None:
+            deadline_epoch = os.environ.get("PIPELINE_DEADLINE_EPOCH")
+        self.deadline_epoch = int(deadline_epoch) if deadline_epoch not in (None, "") else None
         self.timestamps_data = {}
         
         # Load timestamp data if provided
@@ -49,6 +55,15 @@ class ParallelDownloader:
         self.force_redownloaded = 0
         self.max_5xx_retries = 5
         self.retry_delay_seconds = 2.0
+
+    def check_deadline(self, context: str):
+        """Fail fast once the workflow's runtime budget has been exhausted."""
+        if self.deadline_epoch is None:
+            return
+
+        remaining_seconds = self.deadline_epoch - time.time()
+        if remaining_seconds <= 0:
+            raise DeadlineExceeded(f"Pipeline runtime budget exceeded before {context}")
         
     def _load_timestamps(self):
         """Load timestamp data from JSON file"""
@@ -193,6 +208,7 @@ class ParallelDownloader:
     async def download_single(self, session: aiohttp.ClientSession, url: str, output_path: str) -> bool:
         """Download a single file with retry logic"""
         async with self.semaphore:
+            self.check_deadline(f"downloading {output_path}")
             temp_path = self.get_staging_path(output_path)
             
             try:
@@ -237,12 +253,15 @@ class ParallelDownloader:
                                 f"retrying in {self.retry_delay_seconds:.1f}s "
                                 f"({attempt + 1}/{self.max_5xx_retries})"
                             )
+                            self.check_deadline(f"retrying {output_path}")
                             await asyncio.sleep(self.retry_delay_seconds)
                             continue
 
                         print(f"HTTP {response.status} for {url}")
                         return False
-                         
+
+            except DeadlineExceeded:
+                raise
             except Exception as e:
                 print(f"Error downloading {url}: {e}")
                 # Clean up temp file
@@ -261,6 +280,8 @@ class ParallelDownloader:
         
         # Count failures
         for result in results:
+            if isinstance(result, DeadlineExceeded):
+                raise result
             if isinstance(result, Exception) or result is False:
                 self.failed += 1
     
@@ -286,6 +307,7 @@ class ParallelDownloader:
             batch_num = 0
             
             while remaining:
+                self.check_deadline(f"starting download batch {batch_num + 1}")
                 batch_num += 1
                 # Ensure batch size is valid - min_batch_size cannot exceed remaining files
                 effective_min_batch = min(self.min_batch_size, len(remaining))
@@ -307,6 +329,7 @@ class ParallelDownloader:
                 
                 # Random delay between batches (except for the last batch)
                 if remaining:
+                    self.check_deadline("waiting between download batches")
                     delay = random.uniform(self.min_delay, self.max_delay)
                     print(f"  Waiting {delay:.1f}s before next batch...")
                     await asyncio.sleep(delay)
@@ -323,6 +346,7 @@ def main():
     parser.add_argument('--http-method', type=str, default='POST', choices=['GET', 'POST'], help='HTTP method to use (default: POST)')
     parser.add_argument('--timestamp-file', type=str, help='JSON file containing timestamp data for comparison')
     parser.add_argument('--staging-root', type=str, help='Directory used for staged downloads before moving into place')
+    parser.add_argument('--deadline-epoch', type=int, help='Unix epoch after which downloads should stop')
     
     args = parser.parse_args()
     
@@ -335,7 +359,8 @@ def main():
         content_type=args.content_type,
         http_method=args.http_method,
         timestamp_file=args.timestamp_file,
-        staging_root=args.staging_root
+        staging_root=args.staging_root,
+        deadline_epoch=args.deadline_epoch,
     )
     
     # Parse URLs
@@ -356,7 +381,11 @@ def main():
     
     if urls_to_download:
         # Run the downloads
-        asyncio.run(downloader.process_downloads(urls_to_download))
+        try:
+            asyncio.run(downloader.process_downloads(urls_to_download))
+        except DeadlineExceeded as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(1)
     
     # Print final stats
     print("\nDownload Summary:")

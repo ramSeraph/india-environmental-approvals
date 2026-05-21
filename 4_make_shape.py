@@ -11,12 +11,13 @@ import json
 import hashlib
 import shutil
 import tempfile
+import time
 import urllib.parse
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 from xml.etree import ElementTree as ET
 
-from request import ParallelDownloader
+from request import DeadlineExceeded, ParallelDownloader
 
 SHAPE_CACHE_VERSION = 1
 
@@ -32,6 +33,22 @@ def get_stage_root() -> Path:
             ),
         )
     )
+
+def get_deadline_epoch() -> Optional[int]:
+    """Return the pipeline runtime deadline, if one is configured."""
+    deadline = os.environ.get("PIPELINE_DEADLINE_EPOCH")
+    if deadline in (None, ""):
+        return None
+    return int(deadline)
+
+def check_runtime_budget(context: str) -> None:
+    """Stop early once the workflow runtime budget is exhausted."""
+    deadline_epoch = get_deadline_epoch()
+    if deadline_epoch is None:
+        return
+
+    if deadline_epoch - time.time() <= 0:
+        raise DeadlineExceeded(f"Pipeline runtime budget exceeded before {context}")
 
 def generate_kml_filename(url: str) -> str:
     """Generate filename from KML URL parameters"""
@@ -162,6 +179,7 @@ def batch_download_kmls(downloads: List[Tuple[str, str]], staging_root: Path) ->
         content_type='kml',
         http_method='GET',
         staging_root=str(staging_root),
+        deadline_epoch=get_deadline_epoch(),
     )
 
     urls_to_download = downloader.filter_existing_files(downloads)
@@ -418,6 +436,7 @@ def kml_to_geojson_feature(kml_path: Path, csv_row: Dict[str, Any]) -> List[Dict
 
 def process_csv_to_geojsonl(csv_path: str, output_path: str = "geojsonoutput.geojsonl", state: str = ""):
     """Process CSV and create a GeoJSONL file using resumable per-project caches."""
+    check_runtime_budget("starting shape generation")
     
     # Use state-specific KML directory if state is provided
     if state:
@@ -470,6 +489,7 @@ def process_csv_to_geojsonl(csv_path: str, output_path: str = "geojsonoutput.geo
                 total_projects = len(rows)
                 
                 for row_idx, row in enumerate(rows, 1):
+                    check_runtime_budget(f"processing KML-derived geometry for project {row_idx}/{total_projects}")
                     proposal_id = row.get('Proposal Number', '')
                     project_id = row.get('ID', '')
                     kml_urls_str = row.get('KML URLs', '')
@@ -558,7 +578,11 @@ def main():
     print(f"KML files will be saved to: kml/{state}/$ID/")
     print()
     
-    process_csv_to_geojsonl(csv_path, output_path, state)
+    try:
+        process_csv_to_geojsonl(csv_path, output_path, state)
+    except DeadlineExceeded as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

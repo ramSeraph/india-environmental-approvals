@@ -23,11 +23,26 @@ jobs:
   run-state-pipeline:
     name: Run pipeline for ${{ inputs.state_name }}
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 240
+    env:
+      PIPELINE_MAX_RUNTIME_SECONDS: "14400"
 
     steps:
+      - name: Set runtime deadline
+        run: |
+          start_epoch=$(date +%s)
+          deadline_epoch=$((start_epoch + PIPELINE_MAX_RUNTIME_SECONDS))
+          echo "PIPELINE_STARTED_AT_EPOCH=${start_epoch}" >> "$GITHUB_ENV"
+          echo "PIPELINE_DEADLINE_EPOCH=${deadline_epoch}" >> "$GITHUB_ENV"
+          echo "Pipeline deadline epoch: ${deadline_epoch}"
+
       - name: Check out repository
         uses: actions/checkout@v6.0.2
+
+      - name: Check runtime budget before setup
+        run: |
+          chmod +x .github/scripts/check_runtime_budget.sh
+          .github/scripts/check_runtime_budget.sh "setting up the workflow environment"
 
       - name: Set up Python
         uses: actions/setup-python@v6.2.0
@@ -64,10 +79,16 @@ jobs:
           restore-keys: |
             state-data-${{ runner.os }}-${{ inputs.state_code }}-
 
+      - name: Check runtime budget before install
+        run: .github/scripts/check_runtime_budget.sh "installing system dependencies"
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install --yes build-essential curl libsqlite3-dev p7zip-full pkg-config zlib1g-dev
+
+      - name: Check runtime budget before initialize
+        run: .github/scripts/check_runtime_budget.sh "initializing and fetching state data"
 
       - name: Initialize and fetch state data
         env:
@@ -76,11 +97,17 @@ jobs:
           bash 1_initialize.sh "$STATE_CODE"
           bash 2_fetch.sh "$STATE_CODE"
 
+      - name: Check runtime budget before dropping search data
+        run: .github/scripts/check_runtime_budget.sh "dropping search data"
+
       - name: Drop search data
         env:
           STATE_CODE: ${{ inputs.state_code }}
         run: |
           rm -rf "raw/search_${STATE_CODE}"
+
+      - name: Check runtime budget before parse
+        run: .github/scripts/check_runtime_budget.sh "parsing state data"
 
       - name: Parse state data
         env:
@@ -88,11 +115,17 @@ jobs:
         run: |
           uv run --with polars python 3_parse.py "$STATE_CODE"
 
+      - name: Check runtime budget before dropping CAF data
+        run: .github/scripts/check_runtime_budget.sh "dropping CAF data"
+
       - name: Drop CAF data
         env:
           STATE_CODE: ${{ inputs.state_code }}
         run: |
           rm -rf "raw/caf_${STATE_CODE}"
+
+      - name: Check runtime budget before dropping parse cache
+        run: .github/scripts/check_runtime_budget.sh "dropping parse cache"
 
       - name: Drop parse cache
         env:
@@ -100,17 +133,26 @@ jobs:
         run: |
           rm -rf "raw/parse_cache_${STATE_CODE}"
 
+      - name: Check runtime budget before shape build
+        run: .github/scripts/check_runtime_budget.sh "building state geometry"
+
       - name: Build state geometry
         env:
           STATE_CODE: ${{ inputs.state_code }}
         run: |
           uv run --with aiohttp python 4_make_shape.py "$STATE_CODE"
 
+      - name: Check runtime budget before dropping shape cache
+        run: .github/scripts/check_runtime_budget.sh "dropping shape cache"
+
       - name: Drop shape cache
         env:
           STATE_CODE: ${{ inputs.state_code }}
         run: |
           rm -rf "raw/shape_cache_${STATE_CODE}"
+
+      - name: Check runtime budget before geospatial tools
+        run: .github/scripts/check_runtime_budget.sh "installing geospatial tools"
 
       - name: Install geospatial tools
         env:
@@ -139,6 +181,9 @@ jobs:
             cp .tooling/src/tippecanoe/tippecanoe .tooling/bin/
             cp .tooling/src/tippecanoe/tile-join .tooling/bin/
           fi
+
+      - name: Check runtime budget before asset prep
+        run: .github/scripts/check_runtime_budget.sh "preparing release assets"
 
       - name: Prepare release assets
         env:
@@ -243,6 +288,9 @@ jobs:
             .tooling/src/tippecanoe
           key: geospatial-tools-${{ runner.os }}-tippecanoe-cb6cacef152e649d4500af1f4fa9b4c8f1f98d64-pmtiles-v1.30.2
 
+      - name: Check runtime budget before publish
+        run: .github/scripts/check_runtime_budget.sh "publishing release assets"
+
       - name: Publish release assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -257,6 +305,9 @@ jobs:
             "dist/Projects_${{ inputs.state_code }}.pmtiles" \
             "dist/Projects_${{ inputs.state_code }}.parquet" \
             "dist/Projects_${{ inputs.state_code }}_run.txt"
+
+      - name: Check runtime budget before dropping release artifacts
+        run: .github/scripts/check_runtime_budget.sh "dropping release-only artifacts"
 
       - name: Drop release-only artifacts
         env:

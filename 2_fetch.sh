@@ -25,6 +25,21 @@ cleanup_temp_files() {
   done
 }
 
+check_runtime_budget() {
+  local context="$1"
+
+  if [ -z "${PIPELINE_DEADLINE_EPOCH:-}" ]; then
+    return 0
+  fi
+
+  local now
+  now=$(date +%s)
+  if [ "$now" -ge "$PIPELINE_DEADLINE_EPOCH" ]; then
+    echo "Pipeline runtime budget exceeded before ${context}" >&2
+    exit 1
+  fi
+}
+
 is_valid_json_file() {
   local file_path="$1"
 
@@ -73,6 +88,7 @@ if ! command -v uv &> /dev/null; then
 fi
 
 echo "Generating URL list for parallel downloading..."
+check_runtime_budget "building CAF URL list"
 
 # Create combined timestamp file for comparison
 if [ -n "$STATE" ]; then
@@ -89,6 +105,7 @@ TEMP_FILES+=("$URL_FILE_TMP" "$TIMESTAMP_FILE_TMP")
 
 VALID_SEARCH_FILES=()
 for clearance in {1..4}; do
+  check_runtime_budget "processing clearance type ${clearance} search results"
   SEARCH_FILE="$SEARCH_DIR/${clearance}.json"
 
   if [ ! -e "$SEARCH_FILE" ]; then
@@ -176,6 +193,11 @@ echo "  Delay between batches: ${MIN_DELAY}s-${MAX_DELAY}s"
 echo "  Max concurrent downloads: $MAX_CONCURRENT"
 echo ""
 
+deadline_args=()
+if [ -n "${PIPELINE_DEADLINE_EPOCH:-}" ]; then
+  deadline_args+=(--deadline-epoch "$PIPELINE_DEADLINE_EPOCH")
+fi
+
 uv run request.py "$URL_FILE" \
   --min-batch-size "$MIN_BATCH_SIZE" \
   --max-batch-size "$MAX_BATCH_SIZE" \
@@ -183,7 +205,8 @@ uv run request.py "$URL_FILE" \
   --max-delay "$MAX_DELAY" \
   --max-concurrent "$MAX_CONCURRENT" \
   --staging-root "$STAGE_DIR/downloads" \
-  --timestamp-file "$TIMESTAMP_FILE"
+  --timestamp-file "$TIMESTAMP_FILE" \
+  "${deadline_args[@]}"
 
 download_exit_code=$?
 
