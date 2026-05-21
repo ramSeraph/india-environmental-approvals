@@ -6,8 +6,9 @@ STATE_CODE=${1:?state code is required}
 STATE_NAME=${2:?state name is required}
 CSV_ARCHIVE=${3:?csv archive path is required}
 GEOJSONL_ARCHIVE=${4:?geojsonl archive path is required}
-PARQUET_FILE=${5:?parquet file path is required}
-RUN_INFO_FILE=${6:?run info file path is required}
+PMTILES_FILE=${5:?pmtiles file path is required}
+PARQUET_FILE=${6:?parquet file path is required}
+RUN_INFO_FILE=${7:?run info file path is required}
 
 REPO=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}
 RUN_AT=${RUN_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
@@ -71,6 +72,7 @@ for asset in assets:
         {
             "csv": None,
             "geojsonl": None,
+            "pmtiles": None,
             "parquet": None,
             "run_info": None,
         },
@@ -80,6 +82,8 @@ for asset in assets:
         state_entry["csv"] = name
     elif name.endswith(".geojsonl.7z"):
         state_entry["geojsonl"] = name
+    elif name.endswith(".pmtiles"):
+        state_entry["pmtiles"] = name
     elif name.endswith(".parquet"):
         state_entry["parquet"] = name
     elif name.endswith("_run.txt"):
@@ -110,6 +114,11 @@ if grouped_assets:
             lines.append(f"- GeoJSONL archive: [{state_entry['geojsonl']}]({asset_link(state_entry['geojsonl'])})")
         else:
             lines.append("- GeoJSONL archive: not uploaded")
+
+        if state_entry["pmtiles"]:
+            lines.append(f"- PMTiles: [{state_entry['pmtiles']}]({asset_link(state_entry['pmtiles'])})")
+        else:
+            lines.append("- PMTiles: not uploaded")
 
         if state_entry["parquet"]:
             lines.append(f"- GeoParquet: [{state_entry['parquet']}]({asset_link(state_entry['parquet'])})")
@@ -162,6 +171,7 @@ create_release_if_needed "$INITIAL_NOTES"
 gh release upload "$RELEASE_TAG" \
   "$CSV_ARCHIVE" \
   "$GEOJSONL_ARCHIVE" \
+  "$PMTILES_FILE" \
   "$PARQUET_FILE" \
   "$RUN_INFO_FILE" \
   --repo "$REPO" \

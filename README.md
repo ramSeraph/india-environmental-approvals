@@ -120,7 +120,7 @@ The fetch script sources data from Parivesh (https://parivesh.nic.in/)
 
 ## GitHub Actions
 
-Manual GitHub Actions workflows are available for each state LGD code in `states.csv`. Each workflow runs the first four pipeline steps for one state, converts the resulting GeoJSONL into GeoParquet, compresses the `Projects_<STATE>.csv` and `Projects_<STATE>.geojsonl` files with 7-Zip, and uploads those archives plus `Projects_<STATE>.parquet` and a per-run metadata text file to the current month’s immutable GitHub release (`datasets-YYYY-MM`). The newest month release is marked as GitHub’s Latest release.
+Manual GitHub Actions workflows are available for each state LGD code in `states.csv`. Each workflow runs the first four pipeline steps for one state, converts the resulting GeoJSONL into PMTiles and GeoParquet, compresses the `Projects_<STATE>.csv` and `Projects_<STATE>.geojsonl` files with 7-Zip, and uploads those archives plus `Projects_<STATE>.pmtiles`, `Projects_<STATE>.parquet`, and a per-run metadata text file to the current month’s immutable GitHub release (`datasets-YYYY-MM`). The newest month release is marked as GitHub’s Latest release.
 
 ## TODO
 

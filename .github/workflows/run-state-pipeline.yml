@@ -42,6 +42,15 @@ jobs:
             requirements.txt
           cache-suffix: py311-state-pipeline
 
+      - name: Restore geospatial tools cache
+        id: restore-tools-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            .tooling/bin
+            .tooling/src/tippecanoe
+          key: geospatial-tools-${{ runner.os }}-tippecanoe-v1.9.2-pmtiles-v1.30.2
+
       - name: Restore state pipeline cache
         id: restore-state-cache
         uses: actions/cache/restore@v5
@@ -59,7 +68,9 @@ jobs:
             state-data-${{ runner.os }}-${{ inputs.state_code }}-
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install --yes p7zip-full
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential curl libsqlite3-dev p7zip-full pkg-config zlib1g-dev
 
       - name: Run state pipeline
         env:
@@ -70,16 +81,43 @@ jobs:
           uv run --with polars python 3_parse.py "$STATE_CODE"
           uv run --with aiohttp python 4_make_shape.py "$STATE_CODE"
 
+      - name: Install geospatial tools
+        env:
+          PMTILES_VERSION: "1.30.2"
+          TIPPECANOE_VERSION: "1.9.2"
+        run: |
+          mkdir -p .tooling/bin .tooling/src
+          echo "${GITHUB_WORKSPACE}/.tooling/bin" >> "$GITHUB_PATH"
+
+          if [ ! -x .tooling/bin/pmtiles ]; then
+            curl -L --silent --show-error \
+              "https://github.com/protomaps/go-pmtiles/releases/download/v${PMTILES_VERSION}/go-pmtiles_${PMTILES_VERSION}_Linux_x86_64.tar.gz" \
+              -o /tmp/go-pmtiles.tar.gz
+            tar -xzf /tmp/go-pmtiles.tar.gz -C .tooling/bin pmtiles
+            chmod +x .tooling/bin/pmtiles
+          fi
+
+          if [ ! -x .tooling/bin/tippecanoe ] || [ ! -x .tooling/bin/tile-join ]; then
+            rm -rf .tooling/src/tippecanoe
+            git clone --depth 1 --branch "v${TIPPECANOE_VERSION}" https://github.com/felt/tippecanoe.git .tooling/src/tippecanoe
+            make -C .tooling/src/tippecanoe -j"$(nproc)"
+            cp .tooling/src/tippecanoe/tippecanoe .tooling/bin/
+            cp .tooling/src/tippecanoe/tile-join .tooling/bin/
+          fi
+
       - name: Prepare release assets
         env:
           GPIO_VERSION: "0.9.0"
           STATE_CODE: ${{ inputs.state_code }}
           STATE_NAME: ${{ inputs.state_name }}
         run: |
+          export PATH="${GITHUB_WORKSPACE}/.tooling/bin:${PATH}"
           mkdir -p dist
 
           csv_file="csv/Projects_${STATE_CODE}.csv"
           geojsonl_file="geojson/Projects_${STATE_CODE}.geojsonl"
+          pmtiles_file="dist/Projects_${STATE_CODE}.pmtiles"
+          mbtiles_file="dist/Projects_${STATE_CODE}.mbtiles"
           parquet_file="dist/Projects_${STATE_CODE}.parquet"
           run_info_file="dist/Projects_${STATE_CODE}_run.txt"
 
@@ -92,6 +130,23 @@ jobs:
             echo "Missing expected GeoJSONL output: $geojsonl_file" >&2
             exit 1
           fi
+
+          tippecanoe \
+            -P \
+            -S 10 \
+            --increase-gamma-as-needed \
+            -zg \
+            -o "$mbtiles_file" \
+            --simplify-only-low-zooms \
+            --coalesce-smallest-as-needed \
+            --extend-zooms-if-still-dropping \
+            -n "Projects ${STATE_NAME}" \
+            -l "projects_${STATE_CODE}" \
+            -A 'Source: <a href="https://parivesh.nic.in/" target="_blank" rel="noopener noreferrer">Parivesh</a>' \
+            "$geojsonl_file"
+
+          pmtiles convert "$mbtiles_file" "$pmtiles_file"
+          rm -f "$mbtiles_file"
 
           uvx --from "geoparquet-io==${GPIO_VERSION}" gpio convert \
             --geoparquet-version 1.1 \
@@ -110,11 +165,21 @@ jobs:
             echo "Completed At (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "CSV Output: ${csv_file}"
             echo "GeoJSONL Output: ${geojsonl_file}"
+            echo "PMTiles Output: ${pmtiles_file}"
             echo "GeoParquet Output: ${parquet_file}"
           } >"$run_info_file"
 
           7z a -bd -mx=9 "dist/Projects_${STATE_CODE}.csv.7z" "$csv_file"
           7z a -bd -mx=9 "dist/Projects_${STATE_CODE}.geojsonl.7z" "$geojsonl_file"
+
+      - name: Save geospatial tools cache
+        if: always() && steps.restore-tools-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            .tooling/bin
+            .tooling/src/tippecanoe
+          key: geospatial-tools-${{ runner.os }}-tippecanoe-v1.9.2-pmtiles-v1.30.2
 
       - name: Publish release assets
         env:
@@ -127,6 +192,7 @@ jobs:
             "${{ inputs.state_name }}" \
             "dist/Projects_${{ inputs.state_code }}.csv.7z" \
             "dist/Projects_${{ inputs.state_code }}.geojsonl.7z" \
+            "dist/Projects_${{ inputs.state_code }}.pmtiles" \
             "dist/Projects_${{ inputs.state_code }}.parquet" \
             "dist/Projects_${{ inputs.state_code }}_run.txt"
 
