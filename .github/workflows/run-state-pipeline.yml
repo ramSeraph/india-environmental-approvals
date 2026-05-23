@@ -53,8 +53,6 @@ jobs:
         uses: astral-sh/setup-uv@v8.1.0
         with:
           enable-cache: true
-          cache-dependency-glob: |
-            requirements.txt
           cache-suffix: py311-state-pipeline
 
       - name: Restore geospatial tools cache
@@ -71,6 +69,11 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: |
+            raw/search_${{ inputs.state_code }}
+            raw/caf_${{ inputs.state_code }}
+            raw/parse_cache_${{ inputs.state_code }}
+            raw/shape_cache_${{ inputs.state_code }}
+            raw/stage_state/${{ inputs.state_code }}.txt
             kml/${{ inputs.state_code }}
             csv
             geojson
@@ -87,15 +90,43 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes build-essential curl libsqlite3-dev p7zip-full pkg-config zlib1g-dev
 
-      - name: Check runtime budget before initialize
-        run: .github/scripts/check_runtime_budget.sh "initializing and fetching state data"
-
-      - name: Initialize and fetch state data
+      - name: Prepare stage state
         env:
           STATE_CODE: ${{ inputs.state_code }}
         run: |
+          chmod +x .github/scripts/stage_state.sh
+          stage_file="raw/stage_state/${STATE_CODE}.txt"
+          .github/scripts/stage_state.sh init "$stage_file"
+          echo "STAGE_FILE=${stage_file}" >> "$GITHUB_ENV"
+          echo "Current stage: $(.github/scripts/stage_state.sh get "$stage_file")"
+
+      - name: Check runtime budget before initialize
+        run: .github/scripts/check_runtime_budget.sh "initializing state data"
+
+      - name: Initialize state data
+        env:
+          STATE_CODE: ${{ inputs.state_code }}
+        run: |
+          if .github/scripts/stage_state.sh at-least "$STAGE_FILE" 1; then
+            echo "Skipping initialize; stage already complete."
+            exit 0
+          fi
           bash 1_initialize.sh "$STATE_CODE"
+          .github/scripts/stage_state.sh set "$STAGE_FILE" 1
+
+      - name: Check runtime budget before fetch
+        run: .github/scripts/check_runtime_budget.sh "fetching state data"
+
+      - name: Fetch state data
+        env:
+          STATE_CODE: ${{ inputs.state_code }}
+        run: |
+          if .github/scripts/stage_state.sh at-least "$STAGE_FILE" 2; then
+            echo "Skipping fetch; stage already complete."
+            exit 0
+          fi
           bash 2_fetch.sh "$STATE_CODE"
+          .github/scripts/stage_state.sh set "$STAGE_FILE" 2
 
       - name: Check runtime budget before dropping search data
         run: .github/scripts/check_runtime_budget.sh "dropping search data"
@@ -113,7 +144,12 @@ jobs:
         env:
           STATE_CODE: ${{ inputs.state_code }}
         run: |
+          if .github/scripts/stage_state.sh at-least "$STAGE_FILE" 3; then
+            echo "Skipping parse; stage already complete."
+            exit 0
+          fi
           uv run --with polars python 3_parse.py "$STATE_CODE"
+          .github/scripts/stage_state.sh set "$STAGE_FILE" 3
 
       - name: Check runtime budget before dropping CAF data
         run: .github/scripts/check_runtime_budget.sh "dropping CAF data"
@@ -140,7 +176,12 @@ jobs:
         env:
           STATE_CODE: ${{ inputs.state_code }}
         run: |
-          uv run --with aiohttp python 4_make_shape.py "$STATE_CODE"
+          if .github/scripts/stage_state.sh at-least "$STAGE_FILE" 4; then
+            echo "Skipping shape build; stage already complete."
+            exit 0
+          fi
+          uv run 4_make_shape.py "$STATE_CODE"
+          .github/scripts/stage_state.sh set "$STAGE_FILE" 4
 
       - name: Check runtime budget before dropping shape cache
         run: .github/scripts/check_runtime_budget.sh "dropping shape cache"
@@ -323,6 +364,11 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: |
+            raw/search_${{ inputs.state_code }}
+            raw/caf_${{ inputs.state_code }}
+            raw/parse_cache_${{ inputs.state_code }}
+            raw/shape_cache_${{ inputs.state_code }}
+            raw/stage_state/${{ inputs.state_code }}.txt
             kml/${{ inputs.state_code }}
             csv
             geojson
@@ -339,6 +385,7 @@ jobs:
             "raw/caf_${STATE_CODE}" \
             "raw/parse_cache_${STATE_CODE}" \
             "raw/shape_cache_${STATE_CODE}" \
+            "raw/stage_state/${STATE_CODE}.txt" \
             "kml/${STATE_CODE}"
           rm -f \
             "csv/Projects_${STATE_CODE}.csv" \

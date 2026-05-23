@@ -1,4 +1,0 @@
-polars>=0.20.0
-pandas>=2.0.0
-geopandas>=0.14.0
-aiohttp>=3.9.0

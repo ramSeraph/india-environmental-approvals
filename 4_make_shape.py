@@ -1,4 +1,10 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# dependencies = [
+#   "aiohttp>=3.9.0",
+#   "lxml>=5.0.0",
+# ]
+# ///
 """
 make_shape.py - Convert CSV environmental approvals data to GeoJSON with existing KML files
 """
@@ -15,7 +21,7 @@ import time
 import urllib.parse
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
-from xml.etree import ElementTree as ET
+from lxml import etree as ET
 
 from request import DeadlineExceeded, ParallelDownloader
 
@@ -49,13 +55,6 @@ def check_runtime_budget(context: str) -> None:
 
     if deadline_epoch - time.time() <= 0:
         raise DeadlineExceeded(f"Pipeline runtime budget exceeded before {context}")
-
-def get_env_float(name: str, default: float) -> float:
-    """Return an environment override as float when present."""
-    value = os.environ.get(name)
-    if value in (None, ""):
-        return default
-    return float(value)
 
 def generate_kml_filename(url: str) -> str:
     """Generate filename from KML URL parameters"""
@@ -187,8 +186,6 @@ def batch_download_kmls(downloads: List[Tuple[str, str]], staging_root: Path) ->
         http_method='GET',
         staging_root=str(staging_root),
         deadline_epoch=get_deadline_epoch(),
-        min_retry_delay_seconds=get_env_float("KML_MIN_RETRY_DELAY", 1.0),
-        max_retry_delay_seconds=get_env_float("KML_MAX_RETRY_DELAY", 3.0),
     )
 
     urls_to_download = downloader.filter_existing_files(downloads)
@@ -372,6 +369,14 @@ def extract_placemark_geometries(placemark: ET.Element, ns: Dict[str, str]) -> L
 
     return geometries
 
+def parse_kml_root(content: str) -> ET.Element:
+    """Parse KML with XML recovery enabled for malformed upstream files."""
+    parser = ET.XMLParser(recover=True, no_network=True, resolve_entities=False)
+    root = ET.fromstring(content.encode("utf-8"), parser=parser)
+    if root is None:
+        raise ET.XMLSyntaxError("Failed to parse KML", 0, 0, 0)
+    return root
+
 def kml_to_geojson_feature(kml_path: Path, csv_row: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Convert KML file to GeoJSON features with CSV attributes"""
     features = []
@@ -388,7 +393,7 @@ def kml_to_geojson_feature(kml_path: Path, csv_row: Dict[str, Any]) -> List[Dict
             return features
     
     try:
-        root = ET.fromstring(content)
+        root = parse_kml_root(content)
         
         # Handle namespace
         ns = {'kml': 'http://www.opengis.net/kml/2.2'}

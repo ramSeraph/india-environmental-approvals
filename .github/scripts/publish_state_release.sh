@@ -148,16 +148,27 @@ PY
 
 create_release_if_needed() {
   local notes_file="$1"
+  local create_error_file="$TMP_DIR/release-create.stderr"
 
   if release_exists "$RELEASE_TAG"; then
     return
   fi
 
-  gh release create "$RELEASE_TAG" \
+  if gh release create "$RELEASE_TAG" \
     --repo "$REPO" \
     --title "$RELEASE_TITLE" \
     --notes-file "$notes_file" \
-    --latest
+    --latest \
+    2>"$create_error_file"; then
+    return
+  fi
+
+  if release_exists "$RELEASE_TAG"; then
+    return
+  fi
+
+  cat "$create_error_file" >&2
+  return 1
 }
 
 INITIAL_NOTES="$TMP_DIR/initial-notes.md"
