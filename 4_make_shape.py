@@ -15,6 +15,7 @@ import sys
 import csv
 import json
 import hashlib
+import re
 import shutil
 import tempfile
 import time
@@ -26,6 +27,10 @@ from lxml import etree as ET
 from request import DeadlineExceeded, ParallelDownloader
 
 SHAPE_CACHE_VERSION = 1
+
+
+class KMLProcessingError(RuntimeError):
+    """Raised when a KML file cannot be read or parsed safely."""
 
 
 def get_stage_root() -> Path:
@@ -61,14 +66,13 @@ def generate_kml_filename(url: str) -> str:
     try:
         parsed_url = urllib.parse.urlparse(url)
         query_params = urllib.parse.parse_qs(parsed_url.query)
-        
-        # Use refId and uuid for unique filename
+
         ref_id = query_params.get('refId', ['unknown'])[0]
-        uuid = query_params.get('uuid', ['unknown'])[0][:8]  # First 8 chars of UUID
-        return f"{ref_id}_{uuid}.kml"
-    except:
-        # Fallback to hash of URL if parsing fails
-        import hashlib
+        uuid = query_params.get('uuid', ['unknown'])[0][:8]
+        version = query_params.get('version', ['unknown'])[0]
+        safe_version = re.sub(r'[^A-Za-z0-9._-]+', '-', version).strip('-') or 'unknown'
+        return f"{ref_id}_{uuid}_{safe_version}.kml"
+    except Exception:
         return f"kml_{hashlib.md5(url.encode()).hexdigest()[:8]}.kml"
 
 def collect_kml_downloads(csv_path: str, kml_dir: Path) -> List[Tuple[str, str]]:
@@ -377,7 +381,7 @@ def parse_kml_root(content: str) -> ET.Element:
         raise ET.XMLSyntaxError("Failed to parse KML", 0, 0, 0)
     return root
 
-def kml_to_geojson_feature(kml_path: Path, csv_row: Dict[str, Any]) -> List[Dict[str, Any]]:
+def kml_to_geojson_feature(kml_path: Path, csv_row: Dict[str, Any], kml_url: str) -> List[Dict[str, Any]]:
     """Convert KML file to GeoJSON features with CSV attributes"""
     features = []
     
@@ -388,9 +392,10 @@ def kml_to_geojson_feature(kml_path: Path, csv_row: Dict[str, Any]) -> List[Dict
         try:
             with open(kml_path, 'r', encoding='latin-1') as f:
                 content = f.read()
-        except:
-            print(f"Could not read {kml_path}")
-            return features
+        except Exception as exc:
+            raise KMLProcessingError(f"Could not read {kml_path}: {exc}") from exc
+    except OSError as exc:
+        raise KMLProcessingError(f"Could not read {kml_path}: {exc}") from exc
     
     try:
         root = parse_kml_root(content)
@@ -412,6 +417,11 @@ def kml_to_geojson_feature(kml_path: Path, csv_row: Dict[str, Any]) -> List[Dict
                 "properties": dict(csv_row),  # Copy all CSV attributes
                 "geometry": None
             }
+            feature["properties"]["kml_source_url"] = kml_url
+            feature["properties"]["kml_source_file"] = str(kml_path)
+            parsed_kml_url = urllib.parse.urlparse(kml_url)
+            kml_query_params = urllib.parse.parse_qs(parsed_kml_url.query)
+            feature["properties"]["kml_source_version"] = kml_query_params.get('version', [''])[0]
             
             # Add placemark name if available
             name_elem = placemark.find('.//kml:name', ns)
@@ -441,10 +451,10 @@ def kml_to_geojson_feature(kml_path: Path, csv_row: Dict[str, Any]) -> List[Dict
             if feature["geometry"] is not None:
                 features.append(feature)
         
-    except ET.ParseError as e:
-        print(f"Error parsing KML {kml_path}: {e}")
-    except Exception as e:
-        print(f"Unexpected error processing KML {kml_path}: {e}")
+    except ET.ParseError as exc:
+        raise KMLProcessingError(f"Error parsing KML {kml_path}: {exc}") from exc
+    except Exception as exc:
+        raise KMLProcessingError(f"Unexpected error processing KML {kml_path}: {exc}") from exc
     
     return features
 
@@ -484,6 +494,7 @@ def process_csv_to_geojsonl(csv_path: str, output_path: str = "geojsonoutput.geo
     reused_cache_count = 0
     generated_count = 0
     feature_count = 0
+    failed_kmls: List[str] = []
 
     output_dir = os.path.dirname(output_path) or "."
     os.makedirs(output_dir, exist_ok=True)
@@ -519,28 +530,38 @@ def process_csv_to_geojsonl(csv_path: str, output_path: str = "geojsonoutput.geo
                     
                     print(f"Processing {proposal_id} (ID: {project_id}) ({row_idx}/{total_projects}) with {len(kml_urls)} KML file(s)")
 
-                    existing_kml_paths: List[Path] = []
+                    existing_kml_entries: List[Tuple[str, Path]] = []
                     for url in kml_urls:
                         filename = generate_kml_filename(url)
                         kml_path = kml_dir / project_id / filename
 
                         if kml_path.exists():
-                            existing_kml_paths.append(kml_path)
+                            existing_kml_entries.append((url, kml_path))
                         else:
                             print(f"  Warning: KML file not found: {kml_path}")
 
-                    if not existing_kml_paths:
+                    if not existing_kml_entries:
                         continue
 
                     row_signature = build_row_signature(row)
+                    existing_kml_paths = [path for _, path in existing_kml_entries]
                     kml_metadata = collect_kml_input_metadata(existing_kml_paths)
                     cache_path = get_project_cache_path(cache_dir, project_id)
                     project_features = load_cached_project_features(cache_path, row_signature, kml_metadata)
 
                     if project_features is None:
                         project_features = []
-                        for kml_path in existing_kml_paths:
-                            project_features.extend(kml_to_geojson_feature(kml_path, row))
+                        project_failed = False
+                        for kml_url, kml_path in existing_kml_entries:
+                            try:
+                                project_features.extend(kml_to_geojson_feature(kml_path, row, kml_url))
+                            except KMLProcessingError as exc:
+                                failed_kmls.append(str(exc))
+                                project_failed = True
+
+                        if project_failed:
+                            continue
+
                         write_cached_project_features(cache_path, row_signature, kml_metadata, project_features)
                         generated_count += 1
                     else:
@@ -552,6 +573,12 @@ def process_csv_to_geojsonl(csv_path: str, output_path: str = "geojsonoutput.geo
                             output_file.write(json.dumps(feature, ensure_ascii=False))
                             output_file.write("\n")
                             feature_count += 1
+
+        if failed_kmls:
+            print("KML processing failures:")
+            for failure in failed_kmls:
+                print(f"  {failure}")
+            raise KMLProcessingError(f"Encountered {len(failed_kmls)} KML processing failure(s)")
 
         os.replace(temp_output_path, output_path)
     finally:
@@ -594,7 +621,7 @@ def main():
     
     try:
         process_csv_to_geojsonl(csv_path, output_path, state)
-    except DeadlineExceeded as exc:
+    except (DeadlineExceeded, KMLProcessingError) as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)
 
