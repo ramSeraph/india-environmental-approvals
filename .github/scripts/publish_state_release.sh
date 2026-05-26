@@ -110,7 +110,6 @@ prepare_pmtiles_assets() {
   TMPDIR="$PMTILES_PARTITION_TMPDIR" uvx --from "pmtiles-mosaic" partition \
     --from-source "$PMTILES_FILE" \
     --size-limit "$MAX_RELEASE_ASSET_BYTES" \
-    --no-cache \
     --to-pmtiles "${split_dir}/$(basename "$PMTILES_FILE")"
 
   shopt -s nullglob
