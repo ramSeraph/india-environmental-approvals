@@ -17,10 +17,9 @@ RELEASE_TAG=${RELEASE_TAG:-datasets-${RUN_MONTH}}
 RELEASE_TITLE=${RELEASE_TITLE:-Datasets ${RUN_MONTH}}
 GPIO_VERSION=${GPIO_VERSION:-0.9.0}
 MAX_RELEASE_ASSET_BYTES=${MAX_RELEASE_ASSET_BYTES:-2000000000}
+PMTILES_PARTITION_TMPDIR=${PMTILES_PARTITION_TMPDIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/pmtiles-mosaic}
 
 TMP_DIR=$(mktemp -d)
-UPLOAD_DIR="${TMP_DIR}/upload"
-mkdir -p "$UPLOAD_DIR"
 
 cleanup() {
   rm -rf "$TMP_DIR"
@@ -77,6 +76,22 @@ check_release_asset_size() {
   fi
 }
 
+clear_pmtiles_partitioned_outputs() {
+  local pmtiles_prefix="${PMTILES_FILE%.pmtiles}"
+  shopt -s nullglob
+  local existing_parts=("${pmtiles_prefix}"-part*.pmtiles)
+  shopt -u nullglob
+  rm -f "${existing_parts[@]}" "${pmtiles_prefix}.mosaic.json"
+}
+
+clear_parquet_partitioned_outputs() {
+  local parquet_prefix="${PARQUET_FILE%.parquet}"
+  shopt -s nullglob
+  local existing_parts=("${parquet_prefix}".*.parquet)
+  shopt -u nullglob
+  rm -f "${existing_parts[@]}" "${parquet_prefix}.parquet.meta.json"
+}
+
 prepare_pmtiles_assets() {
   pmtiles_assets=()
   if [ ! -f "$PMTILES_FILE" ]; then
@@ -91,8 +106,11 @@ prepare_pmtiles_assets() {
 
   local split_dir="${TMP_DIR}/pmtiles"
   mkdir -p "$split_dir"
-  uvx --from "pmtiles-mosaic" partition \
+  mkdir -p "$PMTILES_PARTITION_TMPDIR"
+  TMPDIR="$PMTILES_PARTITION_TMPDIR" uvx --from "pmtiles-mosaic" partition \
     --from-source "$PMTILES_FILE" \
+    --size-limit "$MAX_RELEASE_ASSET_BYTES" \
+    --no-cache \
     --to-pmtiles "${split_dir}/$(basename "$PMTILES_FILE")"
 
   shopt -s nullglob
@@ -109,7 +127,15 @@ prepare_pmtiles_assets() {
     check_release_asset_size "$split_part"
   done
 
-  pmtiles_assets=("${split_parts[@]}" "${split_mosaics[@]}")
+  clear_pmtiles_partitioned_outputs
+  pmtiles_assets=()
+  for split_file in "${split_parts[@]}" "${split_mosaics[@]}"; do
+    local final_path
+    final_path="$(dirname "$PMTILES_FILE")/$(basename "$split_file")"
+    mv "$split_file" "$final_path"
+    pmtiles_assets+=("$final_path")
+  done
+  rm -f "$PMTILES_FILE"
 }
 
 prepare_parquet_assets() {
@@ -166,16 +192,27 @@ prepare_parquet_assets() {
     partition_count=$((partition_count * 2))
   done
 
+  local final_stage_dir="${TMP_DIR}/parquet-final"
+  rm -rf "$final_stage_dir"
+  mkdir -p "$final_stage_dir"
   renamed_files=()
   for split_file in "${split_files[@]}"; do
-    local new_name="${UPLOAD_DIR}/${base_name}.$(basename "$split_file")"
+    local new_name="${final_stage_dir}/${base_name}.$(basename "$split_file")"
     mv "$split_file" "$new_name"
     renamed_files+=("$new_name")
   done
 
-  local parquet_meta_file="${UPLOAD_DIR}/${base_name}.parquet.meta.json"
+  local parquet_meta_file="${final_stage_dir}/${base_name}.parquet.meta.json"
   python3 .github/scripts/create_parquet_meta.py "$parquet_meta_file" "$GPIO_VERSION" "${renamed_files[@]}"
-  parquet_assets=("${renamed_files[@]}" "$parquet_meta_file")
+  clear_parquet_partitioned_outputs
+  parquet_assets=()
+  for staged_file in "${renamed_files[@]}" "$parquet_meta_file"; do
+    local final_path
+    final_path="$(dirname "$PARQUET_FILE")/$(basename "$staged_file")"
+    mv "$staged_file" "$final_path"
+    parquet_assets+=("$final_path")
+  done
+  rm -f "$PARQUET_FILE"
 }
 
 render_release_notes() {
