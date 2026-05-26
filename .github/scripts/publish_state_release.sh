@@ -15,8 +15,12 @@ RUN_AT=${RUN_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 RUN_MONTH=${RUN_AT:0:7}
 RELEASE_TAG=${RELEASE_TAG:-datasets-${RUN_MONTH}}
 RELEASE_TITLE=${RELEASE_TITLE:-Datasets ${RUN_MONTH}}
+GPIO_VERSION=${GPIO_VERSION:-0.9.0}
+MAX_RELEASE_ASSET_BYTES=${MAX_RELEASE_ASSET_BYTES:-2000000000}
 
 TMP_DIR=$(mktemp -d)
+UPLOAD_DIR="${TMP_DIR}/upload"
+mkdir -p "$UPLOAD_DIR"
 
 cleanup() {
   rm -rf "$TMP_DIR"
@@ -27,6 +31,151 @@ trap cleanup EXIT
 release_exists() {
   local tag="$1"
   gh release view "$tag" --repo "$REPO" --json tagName >/dev/null 2>&1
+}
+
+require_command() {
+  local command_name="$1"
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    echo "Missing required command: $command_name" >&2
+    exit 1
+  fi
+}
+
+require_command gh
+require_command uvx
+require_command python3
+
+file_size_bytes() {
+  python3 - "$1" <<'PY'
+import os
+import sys
+print(os.path.getsize(sys.argv[1]))
+PY
+}
+
+calculate_partition_count() {
+  python3 - "$1" "$2" <<'PY'
+import math
+import sys
+
+file_size = int(sys.argv[1])
+max_release_asset_bytes = int(sys.argv[2])
+if file_size < max_release_asset_bytes:
+    print(1)
+else:
+    min_partitions = math.ceil(file_size / max_release_asset_bytes)
+    power = math.ceil(math.log2(min_partitions))
+    print(2 ** power)
+PY
+}
+
+check_release_asset_size() {
+  local asset_path="$1"
+  if [ "$(file_size_bytes "$asset_path")" -ge "$MAX_RELEASE_ASSET_BYTES" ]; then
+    echo "Release asset still exceeds size limit: $asset_path" >&2
+    exit 1
+  fi
+}
+
+prepare_pmtiles_assets() {
+  pmtiles_assets=()
+  if [ ! -f "$PMTILES_FILE" ]; then
+    echo "Missing PMTiles file: $PMTILES_FILE" >&2
+    exit 1
+  fi
+
+  if [ "$(file_size_bytes "$PMTILES_FILE")" -lt "$MAX_RELEASE_ASSET_BYTES" ]; then
+    pmtiles_assets=("$PMTILES_FILE")
+    return
+  fi
+
+  local split_dir="${TMP_DIR}/pmtiles"
+  mkdir -p "$split_dir"
+  uvx --from "pmtiles-mosaic" partition \
+    --from-source "$PMTILES_FILE" \
+    --to-pmtiles "${split_dir}/$(basename "$PMTILES_FILE")"
+
+  shopt -s nullglob
+  local split_parts=("${split_dir}"/*.pmtiles)
+  local split_mosaics=("${split_dir}"/*.mosaic.json)
+  shopt -u nullglob
+
+  if [ ${#split_parts[@]} -eq 0 ] || [ ${#split_mosaics[@]} -eq 0 ]; then
+    echo "PMTiles partitioning did not produce the expected outputs" >&2
+    exit 1
+  fi
+
+  for split_part in "${split_parts[@]}"; do
+    check_release_asset_size "$split_part"
+  done
+
+  pmtiles_assets=("${split_parts[@]}" "${split_mosaics[@]}")
+}
+
+prepare_parquet_assets() {
+  parquet_assets=()
+  if [ ! -f "$PARQUET_FILE" ]; then
+    echo "Missing GeoParquet file: $PARQUET_FILE" >&2
+    exit 1
+  fi
+
+  if [ "$(file_size_bytes "$PARQUET_FILE")" -lt "$MAX_RELEASE_ASSET_BYTES" ]; then
+    parquet_assets=("$PARQUET_FILE")
+    return
+  fi
+
+  local base_name
+  base_name=$(basename "${PARQUET_FILE%.parquet}")
+  local split_dir="${TMP_DIR}/parquet"
+  local partition_count
+  partition_count=$(calculate_partition_count "$(file_size_bytes "$PARQUET_FILE")" "$MAX_RELEASE_ASSET_BYTES")
+
+  while true; do
+    rm -rf "$split_dir"
+    mkdir -p "$split_dir"
+    uvx --from "geoparquet-io==${GPIO_VERSION}" gpio partition kdtree \
+      "$PARQUET_FILE" \
+      "$split_dir" \
+      --geoparquet-version 1.1 \
+      --compression zstd \
+      --compression-level 22 \
+      --partitions "$partition_count" \
+      -v
+
+    shopt -s nullglob
+    split_files=("${split_dir}"/*.parquet)
+    shopt -u nullglob
+
+    if [ ${#split_files[@]} -eq 0 ]; then
+      echo "GeoParquet partitioning did not produce any output files" >&2
+      exit 1
+    fi
+
+    oversized=0
+    for split_file in "${split_files[@]}"; do
+      if [ "$(file_size_bytes "$split_file")" -ge "$MAX_RELEASE_ASSET_BYTES" ]; then
+        oversized=1
+        break
+      fi
+    done
+
+    if [ "$oversized" -eq 0 ]; then
+      break
+    fi
+
+    partition_count=$((partition_count * 2))
+  done
+
+  renamed_files=()
+  for split_file in "${split_files[@]}"; do
+    local new_name="${UPLOAD_DIR}/${base_name}.$(basename "$split_file")"
+    mv "$split_file" "$new_name"
+    renamed_files+=("$new_name")
+  done
+
+  local parquet_meta_file="${UPLOAD_DIR}/${base_name}.parquet.meta.json"
+  python3 .github/scripts/create_parquet_meta.py "$parquet_meta_file" "$GPIO_VERSION" "${renamed_files[@]}"
+  parquet_assets=("${renamed_files[@]}" "$parquet_meta_file")
 }
 
 render_release_notes() {
@@ -75,8 +224,10 @@ for asset in assets:
         {
             "csv": None,
             "geojsonl": None,
-            "pmtiles": None,
-            "parquet": None,
+            "pmtiles": [],
+            "pmtiles_mosaic": None,
+            "parquet": [],
+            "parquet_meta": None,
             "run_info": None,
         },
     )
@@ -85,10 +236,14 @@ for asset in assets:
         state_entry["csv"] = name
     elif name.endswith(".geojsonl.7z"):
         state_entry["geojsonl"] = name
+    elif name.endswith(".mosaic.json"):
+        state_entry["pmtiles_mosaic"] = name
     elif name.endswith(".pmtiles"):
-        state_entry["pmtiles"] = name
+        state_entry["pmtiles"].append(name)
+    elif name.endswith(".parquet.meta.json"):
+        state_entry["parquet_meta"] = name
     elif name.endswith(".parquet"):
-        state_entry["parquet"] = name
+        state_entry["parquet"].append(name)
     elif name.endswith("_run.txt"):
         state_entry["run_info"] = name
 
@@ -122,14 +277,34 @@ if grouped_assets:
             lines.append("- GeoJSONL archive: not uploaded")
 
         if state_entry["pmtiles"]:
-            lines.append(f"- PMTiles: [{state_entry['pmtiles']}]({asset_link(state_entry['pmtiles'])})")
+            if len(state_entry["pmtiles"]) == 1 and not state_entry["pmtiles_mosaic"]:
+                pmtiles_name = state_entry["pmtiles"][0]
+                lines.append(f"- PMTiles: [{pmtiles_name}]({asset_link(pmtiles_name)})")
+            else:
+                pmtiles_parts = ", ".join(
+                    f"[{name}]({asset_link(name)})" for name in sorted(state_entry["pmtiles"])
+                )
+                lines.append(f"- PMTiles parts: {pmtiles_parts}")
         else:
             lines.append("- PMTiles: not uploaded")
 
+        if state_entry["pmtiles_mosaic"]:
+            lines.append(f"- PMTiles mosaic: [{state_entry['pmtiles_mosaic']}]({asset_link(state_entry['pmtiles_mosaic'])})")
+
         if state_entry["parquet"]:
-            lines.append(f"- GeoParquet: [{state_entry['parquet']}]({asset_link(state_entry['parquet'])})")
+            if len(state_entry["parquet"]) == 1 and not state_entry["parquet_meta"]:
+                parquet_name = state_entry["parquet"][0]
+                lines.append(f"- GeoParquet: [{parquet_name}]({asset_link(parquet_name)})")
+            else:
+                parquet_parts = ", ".join(
+                    f"[{name}]({asset_link(name)})" for name in sorted(state_entry["parquet"])
+                )
+                lines.append(f"- GeoParquet parts: {parquet_parts}")
         else:
             lines.append("- GeoParquet: not uploaded")
+
+        if state_entry["parquet_meta"]:
+            lines.append(f"- GeoParquet metadata: [{state_entry['parquet_meta']}]({asset_link(state_entry['parquet_meta'])})")
 
         if state_entry["run_info"]:
             lines.append(f"- Run metadata: [{state_entry['run_info']}]({asset_link(state_entry['run_info'])})")
@@ -183,11 +358,24 @@ EOF
 
 create_release_if_needed "$INITIAL_NOTES"
 
+prepare_pmtiles_assets
+prepare_parquet_assets
+
+if [ ${#pmtiles_assets[@]} -eq 0 ]; then
+  echo "No PMTiles assets found for upload" >&2
+  exit 1
+fi
+
+if [ ${#parquet_assets[@]} -eq 0 ]; then
+  echo "No GeoParquet assets found for upload" >&2
+  exit 1
+fi
+
 gh release upload "$RELEASE_TAG" \
   "$CSV_ARCHIVE" \
   "$GEOJSONL_ARCHIVE" \
-  "$PMTILES_FILE" \
-  "$PARQUET_FILE" \
+  "${pmtiles_assets[@]}" \
+  "${parquet_assets[@]}" \
   "$RUN_INFO_FILE" \
   --repo "$REPO" \
   --clobber
