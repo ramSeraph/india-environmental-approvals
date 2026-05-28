@@ -26,6 +26,21 @@ require_command pmtiles
 require_command uvx
 require_command 7z
 
+create_flat_archive() {
+  local archive_path="$1"
+  local input_path="$2"
+  local input_dir
+  local input_name
+
+  input_dir=$(dirname "$input_path")
+  input_name=$(basename "$input_path")
+
+  (
+    cd "$input_dir"
+    7z a -bd -mx=9 "$archive_path" "$input_name"
+  )
+}
+
 mkdir -p dist
 
 stage_root="${RUNNER_TEMP:-${PWD}/.staging}/india-environmental-approvals-staging"
@@ -74,7 +89,9 @@ else
     -o "$mbtiles_file" \
     --simplify-only-low-zooms \
     --coalesce-smallest-as-needed \
-    --extend-zooms-if-still-dropping \
+    # this was causing rajasthan to create a very deep pmtiles file which goes past 2 GB and then fail partitioning, so disabling.. unnecesarry in the first place i think
+    # in the intital release only Rajasthan was genereted with this flag off
+    #--extend-zooms-if-still-dropping \
     -n "Projects ${STATE_NAME}" \
     -l "projects_${STATE_CODE}" \
     -A 'Source: <a href="https://parivesh.nic.in/" target="_blank" rel="noopener noreferrer">Parivesh</a>' \
@@ -119,7 +136,7 @@ fi
 mv "$run_info_stage" "$run_info_file"
 
 rm -f "$csv_archive" "$geojsonl_archive" "$csv_archive_stage" "$geojsonl_archive_stage"
-7z a -bd -mx=9 "$csv_archive_stage" "$csv_file"
-7z a -bd -mx=9 "$geojsonl_archive_stage" "$geojsonl_file"
+create_flat_archive "$csv_archive_stage" "$csv_file"
+create_flat_archive "$geojsonl_archive_stage" "$geojsonl_file"
 mv "$csv_archive_stage" "$csv_archive"
 mv "$geojsonl_archive_stage" "$geojsonl_archive"
